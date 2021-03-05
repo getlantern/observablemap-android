@@ -1,6 +1,7 @@
 package io.lantern.observablemodel
 
 import android.content.Context
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.googlecode.concurrenttrees.radix.ConcurrentRadixTree
 import com.googlecode.concurrenttrees.radix.node.concrete.DefaultCharSequenceNodeFactory
 import kotlinx.collections.immutable.PersistentMap
@@ -37,26 +38,30 @@ abstract class Subscriber<T>(val id: String, vararg val pathPrefixes: String) {
  * Observable model provides a simple key/value store with a map-like interface. It allows the
  * registration of observers for any time that a key path changes.
  */
-class ObservableModel private constructor(public val db: SQLiteDatabase) {
-    val subscribers =
+class ObservableModel private constructor(internal val db: SupportSQLiteDatabase) {
+    internal val subscribers =
         ConcurrentRadixTree<PersistentMap<String, Subscriber<Any>>>(DefaultCharSequenceNodeFactory())
-    val subscribersById = ConcurrentHashMap<String, Subscriber<Any>>()
+    internal val subscribersById = ConcurrentHashMap<String, Subscriber<Any>>()
     internal val serde = Serde()
 
     companion object {
         /**
-         * Builds an ObservableModel backed by an encrypted SQLite database at the given filePath
+         * Builds an ObservableModel backed by a SQLite database at the given filePath
          *
-         * collectionName - the name of the map as stored in the database
-         * password - the password used to encrypted the data (the longer the better)
+         * password - if specified, the database will be encrypted using this password
+         * context - encrypted databases can only be built on Android and need a Context
          */
         fun build(
-            ctx: Context,
             filePath: String,
-            password: String,
+            password: String? = null,
+            ctx: Context? = null
         ): ObservableModel {
-            SQLiteDatabase.loadLibs(ctx)
-            val db = SQLiteDatabase.openOrCreateDatabase(filePath, password, null)
+            val db = if (password != null) {
+                SQLiteDatabase.loadLibs(ctx)
+                SQLiteDatabase.openOrCreateDatabase(filePath, password, null)
+            } else {
+                android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(filePath, null)
+            } as SupportSQLiteDatabase
             if (!db.enableWriteAheadLogging()) {
                 throw Exception("Unable to enable write ahead logging")
             }
@@ -280,7 +285,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
     }
 
     fun <T> get(path: String): T? {
-        val cursor = model.db.rawQuery(
+        val cursor = model.db.query(
             "SELECT value FROM kvstore WHERE path = ?", arrayOf(model.serde.serialize(path))
         )
         cursor.use { cursor ->
@@ -298,7 +303,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
         reverseSort: Boolean = false
     ): List<Entry<T>> {
         val sortOrder = if (reverseSort) "DESC" else "ASC"
-        val cursor = model.db.rawQuery(
+        val cursor = model.db.query(
             "SELECT path, value FROM kvstore WHERE path LIKE ? ORDER BY path $sortOrder",
             arrayOf(model.serde.serialize(pathQuery))
         )
@@ -325,7 +330,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
         reverseSort: Boolean = false
     ): List<Detail<T>> {
         val sortOrder = if (reverseSort) "DESC" else "ASC"
-        val cursor = model.db.rawQuery(
+        val cursor = model.db.query(
             "SELECT l.path, d.path, d.value FROM kvstore l INNER JOIN kvstore d ON l.value = d.path WHERE l.path LIKE ? AND SUBSTR(CAST(l.value AS TEXT), 1, 1) = 'T' ORDER BY l.path $sortOrder",
             arrayOf(model.serde.serialize(pathQuery))
         )

@@ -16,7 +16,7 @@ import java.nio.file.attribute.BasicFileAttributes
 import javax.crypto.KeyGenerator
 
 @RunWith(AndroidJUnit4::class)
-class ObservableModelTest {
+class AndroidObservableModelTest {
     private var tempDir: Path? = null
 
     @Test
