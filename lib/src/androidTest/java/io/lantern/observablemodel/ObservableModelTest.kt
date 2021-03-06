@@ -93,6 +93,55 @@ class ObservableModelTest {
     }
 
     @Test
+    fun testFullTextQuery() {
+        val vals = mapOf(
+            "/messages/c" to Message("Message C blah blah"),
+            "/messages/d" to Message("Message D blah blah blah"),
+            "/messages/a" to Message("Message A blah"),
+            "/messages/b" to Message("Message B"),
+        )
+        val model = buildModel()
+        model.mutate { tx ->
+            vals.forEach { (path, value) ->
+                tx.put(path, value, fullText = value.body)
+            }
+            tx.putAll(
+                mapOf(
+                    "/list/1" to "/messages/a",
+                    "/list/2" to "/messages/b",
+                    "/list/3" to "/messages/c",
+                    "/list/4" to "/messages/d",
+                )
+            )
+        }
+
+        assertEquals(
+            arrayListOf(
+                Entry("/messages/a", Message("Message A blah")),
+                Entry("/messages/b", Message("Message B")),
+                Entry("/messages/c", Message("Message C blah blah")),
+                Entry("/messages/d", Message("Message D blah blah blah"))
+            ), model.list<String>("/messages/%")
+        )
+
+        assertEquals(
+            arrayListOf(
+                Entry("/messages/d", Message("Message D blah blah blah")),
+                Entry("/messages/c", Message("Message C blah blah")),
+                Entry("/messages/a", Message("Message A blah"))
+            ), model.list<String>("/%", fullTextSearch = "blah")
+        )
+        assertEquals(
+            arrayListOf(
+                Detail("/list/4", "/messages/d", Message("Message D blah blah blah")),
+                Detail("/list/3", "/messages/c", Message("Message C blah blah")),
+                Detail("/list/1", "/messages/a", Message("Message A blah"))
+            ), model.listDetails<String>("/list/%", fullTextSearch = "blah")
+        )
+        model.close()
+    }
+
+    @Test
     fun testSubscribeDirectLate() {
         val model = buildModel()
         var theValue = "thevalue";
@@ -295,8 +344,14 @@ class ObservableModelTest {
             tx.put("/detail/1", "11")
             tx.put("/list/3", "/detail/3")
             tx.put("/detail/3", "3")
-            tx.put("/list/4", "/detail/unknown") // since this doesn't have details, we shouldn't get notified about it
-            tx.put("/detail/4", "4") // since this detail doesn't link back to a path in the list, we shouldn't get notified about it
+            tx.put(
+                "/list/4",
+                "/detail/unknown"
+            ) // since this doesn't have details, we shouldn't get notified about it
+            tx.put(
+                "/detail/4",
+                "4"
+            ) // since this detail doesn't link back to a path in the list, we shouldn't get notified about it
         }
 
         model.mutate { tx ->
@@ -304,12 +359,14 @@ class ObservableModelTest {
             tx.delete("/list/2")
         }
 
-        assertEquals(setOf(
-            Entry("/list/1", "2"),
-            Entry("/list/2", "11"),
-            Entry("/list/2", "1"),
-            Entry("/list/3", "3"),
-        ), updates)
+        assertEquals(
+            setOf(
+                Entry("/list/1", "2"),
+                Entry("/list/2", "11"),
+                Entry("/list/2", "1"),
+                Entry("/list/3", "3"),
+            ), updates
+        )
 
         assertEquals(setOf("/list/1", "/list/2"), deletions)
         model.close()
@@ -344,7 +401,7 @@ class ObservableModelTest {
         val keyGenerator = KeyGenerator.getInstance("AES")
         keyGenerator.init(256)
         val key = keyGenerator.generateKey()
-        return ObservableModel.build(
+        val model = ObservableModel.build(
             InstrumentationRegistry.getInstrumentation().targetContext,
             filePath = Paths.get(
                 tempDir.toString(),
@@ -352,6 +409,8 @@ class ObservableModelTest {
             ).toString(),
             password = "testpassword",
         )
+        model.registerType(20, Message::class.java)
+        return model
     }
 
     @Before
@@ -385,51 +444,6 @@ class ObservableModelTest {
             })
         }
     }
-
-
-//
-//    @Test
-//    fun testGetRangeDetails() {
-//        val model = buildModel()
-//        var theValue = listOf(1, 2, 3)
-//        model.mutate { tx ->
-//            tx.put("path", theValue)
-//        }
-//        model.mutate { tx ->
-//            theValue.forEach {
-//                tx.put("details/$it", "detail $it")
-//            }
-//        }
-//        assertEquals(listOf("detail 2", "detail 3"), model.getRangeDetails<String>("path", "details", 1, 3))
-//    }
-//
-//    @Test
-//    fun testSubscribeDetails() {
-//        val model = buildModel()
-//        var theValue = listOf(1, 2, 3)
-//        model.mutate { tx ->
-//            tx.put("path", theValue)
-//        }
-//        model.mutate { tx ->
-//            theValue.forEach { tx.put("details/$it", "detail $it") }
-//        }
-//
-//        model.subscribeDetails<String>(100, "path", "details") { path: String, value: List ->
-//            assertEquals("path", path)
-//            assertEquals(theValue.map { "detail $it" }, value)
-//            assertEquals(listOf("detail 2", "detail 3"), model.getRangeDetails<String>("path", "details", 1, 3))
-//        }
-//        model.close()
-//    }
 }
-//
-//class InMemoryObservableModelTest : ObservableModelTest() {
-//    override fun buildModel(): ObservableModel {
-//        return ObservableModel.build()
-//    }
-//}
-//
-//class EncryptedFileBasedObservableModelTest : ObservableModelTest() {
-//
-//
-//}
+
+internal data class Message(val body: String = "")

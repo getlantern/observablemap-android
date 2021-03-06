@@ -61,9 +61,11 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
                 throw Exception("Unable to enable write ahead logging")
             }
             // All data is stored in a single table that has a TEXT path and a BLOB value
-            db.execSQL("CREATE TABLE IF NOT EXISTS kvstore ([path] TEXT PRIMARY KEY, [value] BLOB)")
+            db.execSQL("CREATE TABLE IF NOT EXISTS data ([path] TEXT PRIMARY KEY, [value] BLOB)")
             // Create an index on only text values to speed up detail lookups that join on path = value
-            db.execSQL("CREATE INDEX IF NOT EXISTS kvstore_value_index ON kvstore(value) WHERE SUBSTR(CAST(value AS TEXT), 1, 1) = 'T'")
+            db.execSQL("CREATE INDEX IF NOT EXISTS data_value_index ON data(value) WHERE SUBSTR(CAST(value AS TEXT), 1, 1) = 'T'")
+            // Create a table for full text search
+            db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(value, content=data, tokenize='porter unicode61')")
             return ObservableModel(db)
         }
     }
@@ -185,14 +187,21 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
      *  "/detail/2": "two"}
      *
      * The pathQuery "/detail/%" would return ["one", "two"]
+     *
+     * By default results are sorted lexicographically by path. If reverseSort is specified, that is
+     * reversed.
+     *
+     * If fullTextSearch is specified, in addition to the pathQuery, rows will be filtered by
+     * searching for matches to the fullTextSearch term in the full text index.
      */
     fun <T> list(
         pathQuery: String,
         start: Int = 0,
         count: Int = Int.MAX_VALUE,
+        fullTextSearch: String? = null,
         reverseSort: Boolean = false
     ): List<Entry<T>> {
-        return Transaction(this).list(pathQuery, start, count, reverseSort)
+        return Transaction(this).list(pathQuery, start, count, fullTextSearch, reverseSort)
     }
 
     /**
@@ -207,14 +216,19 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
      *  "/list/2": "/detail/1"}
      *
      * The pathQuery "/list/%" would return ["two", "one"]
+     *
+     * If fullTextSearch is specified, in addition to the pathQuery, detail rows will be filtered by
+     * searching for matches to the fullTextSearch term in the full text index corresponding to the
+     * detail rows (not the top level list).
      */
     fun <T> listDetails(
         pathQuery: String,
         start: Int = 0,
         count: Int = Int.MAX_VALUE,
+        fullTextSearch: String? = null,
         reverseSort: Boolean = false
     ): List<Detail<T>> {
-        return Transaction(this).listDetails(pathQuery, start, count, reverseSort)
+        return Transaction(this).listDetails(pathQuery, start, count, fullTextSearch, reverseSort)
     }
 
     /**
@@ -249,13 +263,22 @@ class Transaction internal constructor(private val model: ObservableModel) {
 
     /**
      * Puts the given value at the given path. If the value is null, the path is deleted.
+     *
+     * If fullText is populated, the given data will also be full text indexed.
      */
-    fun put(path: String, value: Any?) {
+    fun put(path: String, value: Any?, fullText: String? = null) {
+        val serializedPath = model.serde.serialize(path)
         value?.let {
             model.db.execSQL(
-                "INSERT INTO kvstore(path, value) VALUES(?, ?) ON CONFLICT(path) DO UPDATE SET value = EXCLUDED.value",
-                arrayOf(model.serde.serialize(path), model.serde.serialize(value))
+                "INSERT INTO data(path, value) VALUES(?, ?) ON CONFLICT(path) DO UPDATE SET value = EXCLUDED.value",
+                arrayOf(serializedPath, model.serde.serialize(value))
             )
+            if (fullText != null) {
+                model.db.execSQL(
+                    "INSERT INTO fts(rowid, value) VALUES((SELECT rowid FROM data WHERE path = ?), ?)",
+                    arrayOf(serializedPath, fullText)
+                )
+            }
             updates[path] = value
             deletions -= path
         } ?: run {
@@ -274,14 +297,14 @@ class Transaction internal constructor(private val model: ObservableModel) {
      * Deletes the value at the given path
      */
     fun delete(path: String) {
-        model.db.execSQL("DELETE FROM kvstore WHERE path = ?", arrayOf(model.serde.serialize(path)))
+        model.db.execSQL("DELETE FROM data WHERE path = ?", arrayOf(model.serde.serialize(path)))
         deletions += path
         updates.remove(path)
     }
 
     fun <T> get(path: String): T? {
         val cursor = model.db.rawQuery(
-            "SELECT value FROM kvstore WHERE path = ?", arrayOf(model.serde.serialize(path))
+            "SELECT value FROM data WHERE path = ?", arrayOf(model.serde.serialize(path))
         )
         cursor.use { cursor ->
             if (cursor == null || !cursor.moveToNext()) {
@@ -295,13 +318,21 @@ class Transaction internal constructor(private val model: ObservableModel) {
         pathQuery: String,
         start: Int = 0,
         count: Int = Int.MAX_VALUE,
+        fullTextSearch: String? = null,
         reverseSort: Boolean = false
     ): List<Entry<T>> {
-        val sortOrder = if (reverseSort) "DESC" else "ASC"
-        val cursor = model.db.rawQuery(
-            "SELECT path, value FROM kvstore WHERE path LIKE ? ORDER BY path $sortOrder",
-            arrayOf(model.serde.serialize(pathQuery))
-        )
+        val cursor = if (fullTextSearch != null) {
+            model.db.rawQuery(
+                "SELECT data.path, data.value FROM fts INNER JOIN data ON fts.rowid = data.rowid WHERE data.path LIKE ? AND fts.value MATCH ? ORDER BY fts.rank",
+                arrayOf(model.serde.serialize(pathQuery), fullTextSearch)
+            )
+        } else {
+            val sortOrder = if (reverseSort) "DESC" else "ASC"
+            model.db.rawQuery(
+                "SELECT path, value FROM data WHERE path LIKE ? ORDER BY path $sortOrder",
+                arrayOf(model.serde.serialize(pathQuery))
+            )
+        }
         cursor.use { cursor ->
             val result = ArrayList<Entry<T>>()
             if (cursor != null && (start == 0 || cursor.moveToPosition(start - 1))) {
@@ -322,13 +353,21 @@ class Transaction internal constructor(private val model: ObservableModel) {
         pathQuery: String,
         start: Int = 0,
         count: Int = Int.MAX_VALUE,
+        fullTextSearch: String? = null,
         reverseSort: Boolean = false
     ): List<Detail<T>> {
-        val sortOrder = if (reverseSort) "DESC" else "ASC"
-        val cursor = model.db.rawQuery(
-            "SELECT l.path, d.path, d.value FROM kvstore l INNER JOIN kvstore d ON l.value = d.path WHERE l.path LIKE ? AND SUBSTR(CAST(l.value AS TEXT), 1, 1) = 'T' ORDER BY l.path $sortOrder",
-            arrayOf(model.serde.serialize(pathQuery))
-        )
+        val cursor = if (fullTextSearch != null) {
+            model.db.rawQuery(
+                "SELECT l.path, d.path, d.value FROM data l INNER JOIN data d ON l.value = d.path INNER JOIN fts ON fts.rowid = d.rowid WHERE l.path LIKE ? AND SUBSTR(CAST(l.value AS TEXT), 1, 1) = 'T' AND fts.value MATCH ? ORDER BY fts.rank",
+                arrayOf(model.serde.serialize(pathQuery), fullTextSearch)
+            )
+        } else {
+            val sortOrder = if (reverseSort) "DESC" else "ASC"
+            model.db.rawQuery(
+                "SELECT l.path, d.path, d.value FROM data l INNER JOIN data d ON l.value = d.path WHERE l.path LIKE ? AND SUBSTR(CAST(l.value AS TEXT), 1, 1) = 'T' ORDER BY l.path $sortOrder",
+                arrayOf(model.serde.serialize(pathQuery))
+            )
+        }
         cursor.use { cursor ->
             val result = ArrayList<Detail<T>>()
             if (cursor != null && (start == 0 || cursor.moveToPosition(start - 1))) {

@@ -95,7 +95,7 @@ class SerdeTest {
             bytesRegistered[0].toChar()
         )
         assertEquals(
-            "round-tripped registered kryo object should match original",
+            "round-tripped registered protocol buffer object should match original",
             obj,
             serde.deserialize(bytesRegistered)
         )
