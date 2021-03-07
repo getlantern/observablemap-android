@@ -54,7 +54,6 @@ dependencies {
     implementation 'org.objenesis:objenesis:2.6'
 
     implementation 'com.google.protobuf:protobuf-javalite:3.10.0'
-    implementation group: 'com.googlecode.concurrent-trees', name: 'concurrent-trees', version: '2.6.1'
 
     testImplementation 'junit:junit:4.+'
     androidTestImplementation 'androidx.test:runner:1.1.1'

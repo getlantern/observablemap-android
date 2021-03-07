@@ -1,8 +1,8 @@
 package io.lantern.observablemodel
 
 import android.content.Context
-import com.googlecode.concurrenttrees.radix.ConcurrentRadixTree
-import com.googlecode.concurrenttrees.radix.node.concrete.DefaultCharSequenceNodeFactory
+import ca.gedge.radixtree.RadixTree
+import ca.gedge.radixtree.RadixTreeVisitor
 import kotlinx.collections.immutable.PersistentMap
 import kotlinx.collections.immutable.persistentHashMapOf
 import net.sqlcipher.database.SQLiteDatabase
@@ -38,8 +38,7 @@ abstract class Subscriber<T>(internal val id: String, internal vararg val pathPr
  * registration of observers for any time that a key path changes.
  */
 class ObservableModel private constructor(internal val db: SQLiteDatabase) {
-    internal val subscribers =
-        ConcurrentRadixTree<PersistentMap<String, Subscriber<Any>>>(DefaultCharSequenceNodeFactory())
+    internal val subscribers = RadixTree<PersistentMap<String, Subscriber<Any>>>();
     internal val subscribersById = ConcurrentHashMap<String, Subscriber<Any>>()
     internal val serde = Serde()
 
@@ -98,7 +97,7 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
             throw IllegalArgumentException("subscriber with id ${subscriber.id} already registered")
         }
         subscriber.pathPrefixes.forEach { pathPrefix ->
-            val subscribersForPrefix = subscribers.getValueForExactKey(pathPrefix)?.let {
+            val subscribersForPrefix = subscribers.get(pathPrefix)?.let {
                 it.put(
                     subscriber.id,
                     subscriber
@@ -155,7 +154,7 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
         val subscriber = subscribersById.remove(subscriberId)
         subscriber?.pathPrefixes?.forEach { pathPrefix ->
             val subscribersForPrefix =
-                subscribers.getValueForExactKey(pathPrefix)?.remove(subscriber.id)
+                subscribers.get(pathPrefix)?.remove(subscriber.id)
             if (subscribersForPrefix?.size ?: 0 == 0) {
                 subscribers.remove(pathPrefix)
             } else {
@@ -302,9 +301,15 @@ class Transaction internal constructor(private val model: ObservableModel) {
             val cursor = model.db.rawQuery(
                 "SELECT rowid, value FROM data WHERE path = ?", arrayOf(serializedPath)
             )
-            cursor.use { cursor ->
+            cursor.use {
                 if (cursor != null && cursor.moveToNext()) {
-                    model.db.execSQL("INSERT INTO fts(fts, rowid, value) VALUES('delete', ?, ?)", arrayOf(cursor.getLong(0), extractFullText(model.serde.deserialize(cursor.getBlob(1)))))
+                    model.db.execSQL(
+                        "INSERT INTO fts(fts, rowid, value) VALUES('delete', ?, ?)",
+                        arrayOf(
+                            cursor.getLong(0),
+                            extractFullText(model.serde.deserialize(cursor.getBlob(1)))
+                        )
+                    )
                 }
             }
         }
@@ -321,7 +326,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
         val cursor = model.db.rawQuery(
             "SELECT value FROM data WHERE path = ?", arrayOf(model.serde.serialize(path))
         )
-        cursor.use { cursor ->
+        cursor.use {
             if (cursor == null || !cursor.moveToNext()) {
                 return null
             }
@@ -348,7 +353,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
                 arrayOf(model.serde.serialize(pathQuery))
             )
         }
-        cursor.use { cursor ->
+        cursor.use {
             val result = ArrayList<Entry<T>>()
             if (cursor != null && (start == 0 || cursor.moveToPosition(start - 1))) {
                 while (cursor.moveToNext() && result.size < count) {
@@ -383,7 +388,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
                 arrayOf(model.serde.serialize(pathQuery))
             )
         }
-        cursor.use { cursor ->
+        cursor.use {
             val result = ArrayList<Detail<T>>()
             if (cursor != null && (start == 0 || cursor.moveToPosition(start - 1))) {
                 while (cursor.moveToNext() && result.size < count) {
@@ -401,17 +406,44 @@ class Transaction internal constructor(private val model: ObservableModel) {
     }
 
     internal fun publish() {
-        updates.forEach { (path, value) ->
-            model.subscribers.getKeyValuePairsForClosestKeys(path).forEach {
-                // TODO: there may be a more efficient way to model this than finding closest keys and then checking prefix matches ourselves
-                if (path.startsWith(it.key)) it.value.values.forEach { it.onUpdate(path, value) }
-            }
+        updates.forEach { (path, newValue) ->
+            model.subscribers.visit(object :
+                RadixTreeVisitor<PersistentMap<String, Subscriber<Any>>, Void?> {
+                override fun visit(
+                    key: String?,
+                    value: PersistentMap<String, Subscriber<Any>>?
+                ): Boolean {
+                    if (key == null || !path.startsWith(key)) {
+                        return false
+                    }
+                    value?.values?.forEach { it.onUpdate(path, newValue) }
+                    return true
+                }
+
+                override fun getResult(): Void? {
+                    return null
+                }
+            })
         }
 
         deletions.forEach { path ->
-            model.subscribers.getKeyValuePairsForClosestKeys(path).forEach {
-                if (path.startsWith(it.key)) it.value.values.forEach { it.onDelete(path) }
-            }
+            model.subscribers.visit(object :
+                RadixTreeVisitor<PersistentMap<String, Subscriber<Any>>, Void?> {
+                override fun visit(
+                    key: String?,
+                    value: PersistentMap<String, Subscriber<Any>>?
+                ): Boolean {
+                    if (key == null || !path.startsWith(key)) {
+                        return false
+                    }
+                    value?.values?.forEach { it.onDelete(path) }
+                    return true
+                }
+
+                override fun getResult(): Void? {
+                    return null
+                }
+            })
         }
     }
 }
@@ -423,10 +455,11 @@ internal class DetailsSubscriber<T>(
     internal val subscribersForDetails = ConcurrentHashMap<String, Subscriber<T>>()
 
     @Synchronized
-    override fun onUpdate(path: String, detailPath: String) {
-        val value = model.get<T>(detailPath)
-        if (value != null) {
-            onUpdate(path, detailPath, value)
+    override fun onUpdate(path: String, value: String) {
+        val detailPath = value;
+        val newValue = model.get<T>(detailPath)
+        if (newValue != null) {
+            onUpdate(path, detailPath, newValue)
         }
     }
 
