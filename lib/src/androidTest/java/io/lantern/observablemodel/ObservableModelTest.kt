@@ -131,6 +131,7 @@ class ObservableModelTest {
                 Entry("/messages/a", Message("Message A blah"))
             ), model.list<String>("/%", fullTextSearch = "blah")
         )
+
         assertEquals(
             arrayListOf(
                 Detail("/list/4", "/messages/d", Message("Message D blah blah blah")),
@@ -138,6 +139,23 @@ class ObservableModelTest {
                 Detail("/list/1", "/messages/a", Message("Message A blah"))
             ), model.listDetails<String>("/list/%", fullTextSearch = "blah")
         )
+
+        // now delete
+        model.mutate { tx ->
+            // delete an entry including the full text index
+            tx.delete("/messages/d", extractFullText = { msg: Message -> msg.body })
+            // add the entry back without full-text indexing to make sure it doesn't show up in results
+            tx.put("/messages/d", Message("Message D blah blah blah"))
+            // delete another entry without deleting the full text index
+            tx.delete("/messages/c")
+        }
+
+        assertEquals(
+            arrayListOf(
+                Entry("/messages/a", Message("Message A blah"))
+            ), model.list<String>("/%", fullTextSearch = "blah")
+        )
+
         model.close()
     }
 

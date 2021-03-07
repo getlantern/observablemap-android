@@ -296,10 +296,25 @@ class Transaction internal constructor(private val model: ObservableModel) {
     /**
      * Deletes the value at the given path
      */
-    fun delete(path: String) {
-        model.db.execSQL("DELETE FROM data WHERE path = ?", arrayOf(model.serde.serialize(path)))
+    fun <T> delete(path: String, extractFullText: ((T) -> String)? = null) {
+        val serializedPath = model.serde.serialize(path)
+        extractFullText?.let {
+            val cursor = model.db.rawQuery(
+                "SELECT rowid, value FROM data WHERE path = ?", arrayOf(serializedPath)
+            )
+            cursor.use { cursor ->
+                if (cursor != null && cursor.moveToNext()) {
+                    model.db.execSQL("INSERT INTO fts(fts, rowid, value) VALUES('delete', ?, ?)", arrayOf(cursor.getLong(0), extractFullText(model.serde.deserialize(cursor.getBlob(1)))))
+                }
+            }
+        }
+        model.db.execSQL("DELETE FROM data WHERE path = ?", arrayOf(serializedPath))
         deletions += path
         updates.remove(path)
+    }
+
+    fun delete(path: String) {
+        delete<Any>(path, null)
     }
 
     fun <T> get(path: String): T? {
