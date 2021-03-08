@@ -38,7 +38,11 @@ class ObservableModelTest {
             )
         }
         assertEquals("That Person", model.get("/contacts/32af234asdf324"))
-        assertEquals("Message C", model.get("/messages/c"))
+        assertEquals(
+            Raw(model.serde, "That Person"),
+            model.getRaw<String>("/contacts/32af234asdf324")
+        )
+
         assertEquals(
             arrayListOf(
                 Entry("/messages/a", "Message A"),
@@ -47,6 +51,15 @@ class ObservableModelTest {
                 Entry("/messages/d", "Message D")
             ), model.list<String>("/messages/%")
         )
+        assertEquals(
+            arrayListOf(
+                Entry("/messages/a", Raw(model.serde, "Message A")),
+                Entry("/messages/b", Raw(model.serde, "Message B")),
+                Entry("/messages/c", Raw(model.serde, "Message C")),
+                Entry("/messages/d", Raw(model.serde, "Message D"))
+            ), model.listRaw<String>("/messages/%")
+        )
+
         assertEquals(
             arrayListOf(
                 Detail(
@@ -71,6 +84,31 @@ class ObservableModelTest {
                 reverseSort = true
             )
         )
+        assertEquals(
+            arrayListOf(
+                Detail(
+                    "/contacts/32af234asdf324/messages_by_timestamp/3",
+                    "/messages/b",
+                    Raw(model.serde, "Message B")
+                ),
+                Detail(
+                    "/contacts/32af234asdf324/messages_by_timestamp/2",
+                    "/messages/a",
+                    Raw(model.serde, "Message A")
+                ),
+                Detail(
+                    "/contacts/32af234asdf324/messages_by_timestamp/1",
+                    "/messages/c",
+                    Raw(model.serde, "Message C")
+                ),
+            ), model.listDetailsRaw<String>(
+                "/contacts/32af234asdf324/messages_by_timestamp/%",
+                0,
+                10,
+                reverseSort = true
+            )
+        )
+
         assertEquals(
             arrayListOf("Message C", "Message A", "Message B"),
             model.listDetails<String>("/contacts/32af234asdf324/messages_by_timestamp/%", 0, 10)
