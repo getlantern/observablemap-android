@@ -3,6 +3,8 @@
  */
 package io.lantern.observablemodel
 
+import android.content.Context
+import android.content.SharedPreferences
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
@@ -451,6 +453,112 @@ class ObservableModelTest {
         assertEquals("value2", model2.get<String>("path2"))
         assertNull("path3 should have been rolled back", model2.get("path3"))
         model2.close()
+    }
+
+    @Test
+    fun testSharedPreferences() {
+        val fallback =
+            InstrumentationRegistry.getInstrumentation().targetContext.getSharedPreferences(
+                "testPreferences",
+                Context.MODE_PRIVATE
+            )
+        fallback.edit().putBoolean("fboolean", true).putFloat("ffloat", 1.1.toFloat())
+            .putInt("fint", 2).putLong("flong", 3).putString("fstring", "fallbackstring")
+            .putBoolean("boolean", true).putFloat("float", 1.1.toFloat()).putInt("int", 2)
+            .putLong("long", 3).putString("string", "fallbackstring").commit()
+        val model = buildModel();
+        val prefs = model.asSharedPreferences("/prefs/", fallback)
+        prefs.edit().putBoolean("boolean", true).putFloat("float", 11.11.toFloat())
+            .putInt("int", 22)
+            .putLong("long", 33).putString("string", "realstring").commit()
+
+        assertEquals(
+            mapOf(
+                "fboolean" to true,
+                "ffloat" to 1.1.toFloat(),
+                "fint" to 2,
+                "flong" to 3.toLong(),
+                "fstring" to "fallbackstring",
+                "boolean" to true,
+                "float" to 11.11.toFloat(),
+                "int" to 22,
+                "long" to 33.toLong(),
+                "string" to "realstring"
+            ), prefs.all
+        )
+
+        assertTrue(model.get<Boolean>("/prefs/boolean") ?: false)
+        assertTrue(prefs.getBoolean("boolean", false))
+        assertTrue(prefs.getBoolean("fboolean", false))
+        assertTrue(prefs.getBoolean("uboolean", true))
+
+        assertEquals(11.11.toFloat(), model.get<Float>("/prefs/float"))
+        assertEquals(11.11.toFloat(), prefs.getFloat("float", 111.111.toFloat()))
+        assertEquals(1.1.toFloat(), prefs.getFloat("ffloat", 111.111.toFloat()))
+        assertEquals(111.111.toFloat(), prefs.getFloat("ufloat", 111.111.toFloat()))
+
+        assertEquals(22, model.get<Int>("/prefs/int"))
+        assertEquals(22, prefs.getInt("int", 222))
+        assertEquals(2, prefs.getInt("fint", 222))
+        assertEquals(222, prefs.getInt("uint", 222))
+
+        assertEquals(33.toLong(), model.get<Long>("/prefs/long"))
+        assertEquals(33.toLong(), prefs.getLong("long", 333))
+        assertEquals(3.toLong(), prefs.getLong("flong", 333))
+        assertEquals(333.toLong(), prefs.getLong("ulong", 333))
+
+        assertEquals("realstring", model.get<String>("/prefs/string"))
+        assertEquals("realstring", prefs.getString("string", "unknownstring"))
+        assertEquals("fallbackstring", prefs.getString("fstring", "unknownstring"))
+        assertEquals("unknownstring", prefs.getString("ustring", "unknownstring"))
+
+        prefs.edit().remove("boolean").remove("float").remove("int").remove("long").remove("string")
+            .apply()
+        assertNull(model.get<Boolean>("/prefs/boolean"))
+        assertTrue(prefs.getBoolean("boolean", false))
+
+        assertNull(model.get<Float>("/prefs/float"))
+        assertEquals(1.1.toFloat(), prefs.getFloat("float", 111.111.toFloat()))
+
+        assertNull(model.get<Int>("/prefs/int"))
+        assertEquals(2, prefs.getInt("int", 222))
+
+        assertNull(model.get<Long>("/prefs/long"))
+        assertEquals(3.toLong(), prefs.getLong("long", 333))
+
+        assertNull(model.get<String>("/prefs/string"))
+        assertEquals("fallbackstring", prefs.getString("string", "unknownstring"))
+    }
+
+    @Test
+    fun testPreferencesListener() {
+        val model = buildModel()
+        val prefs = model.asSharedPreferences("/prefs/")
+
+        val updatedKeys = HashSet<String>()
+        val listener = object : SharedPreferences.OnSharedPreferenceChangeListener {
+            override fun onSharedPreferenceChanged(
+                sharedPreferences: SharedPreferences?,
+                key: String?
+            ) {
+                updatedKeys.add(key!!)
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+
+        prefs.edit().putString("string", "My String").putInt("int", 5).commit()
+        assertEquals(mapOf("string" to "My String", "int" to 5), prefs.all)
+        assertEquals(setOf("string", "int"), updatedKeys)
+
+        updatedKeys.clear()
+        prefs.edit().clear().commit()
+        assertEquals(0, prefs.all.size)
+        assertEquals(setOf("string", "int"), updatedKeys)
+
+        updatedKeys.clear()
+        prefs.unregisterOnSharedPreferenceChangeListener(listener)
+        prefs.edit().putString("newstring", "My New String").commit()
+        assertEquals(0, updatedKeys.size)
     }
 
     private fun buildModel(): ObservableModel {

@@ -1,6 +1,7 @@
 package io.lantern.observablemodel
 
 import android.content.Context
+import android.content.SharedPreferences
 import ca.gedge.radixtree.RadixTree
 import ca.gedge.radixtree.RadixTreeVisitor
 import kotlinx.collections.immutable.PersistentMap
@@ -21,7 +22,10 @@ data class Detail<T>(val path: String, val detailPath: String, val value: T)
  * id - unique identifier for this subscriber
  * pathPrefixes - subscriber will receive notifications for all changes under these path prefixes
  */
-abstract class RawSubscriber<T: Any>(internal val id: String, internal vararg val pathPrefixes: String) {
+abstract class RawSubscriber<T : Any>(
+    internal val id: String,
+    internal vararg val pathPrefixes: String
+) {
     /**
      * Called when the value at the given path changes
      */
@@ -33,7 +37,8 @@ abstract class RawSubscriber<T: Any>(internal val id: String, internal vararg va
     abstract fun onDelete(path: String)
 }
 
-abstract class Subscriber<T: Any>(id: String, vararg pathPrefixes: String): RawSubscriber<T>(id, *pathPrefixes) {
+abstract class Subscriber<T : Any>(id: String, vararg pathPrefixes: String) :
+    RawSubscriber<T>(id, *pathPrefixes) {
     override fun onUpdate(path: String, raw: Raw<T>) {
         onUpdate(path, raw.value)
     }
@@ -97,7 +102,7 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
      * If receiveInitial is true, the subscriber will immediately be called for all matching values.
      */
     @Synchronized
-    fun <T: Any> subscribe(
+    fun <T : Any> subscribe(
         subscriber: RawSubscriber<T>,
         receiveInitial: Boolean = true
     ) {
@@ -139,7 +144,7 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
      * is deleted from /list/.
      */
     @Synchronized
-    fun <T: Any> subscribeDetails(
+    fun <T : Any> subscribeDetails(
         subscriber: RawSubscriber<T>,
         receiveInitial: Boolean = true
     ) {
@@ -181,14 +186,14 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
     /**
      * Gets the value at the given path
      */
-    fun <T: Any> get(path: String): T? {
+    fun <T : Any> get(path: String): T? {
         return Transaction(this).get(path)
     }
 
     /**
      * Gets the raw value at the given path
      */
-    fun <T: Any> getRaw(path: String): Raw<T>? {
+    fun <T : Any> getRaw(path: String): Raw<T>? {
         return Transaction(this).getRaw(path)
     }
 
@@ -208,7 +213,7 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
      * If fullTextSearch is specified, in addition to the pathQuery, rows will be filtered by
      * searching for matches to the fullTextSearch term in the full text index.
      */
-    fun <T: Any> list(
+    fun <T : Any> list(
         pathQuery: String,
         start: Int = 0,
         count: Int = Int.MAX_VALUE,
@@ -221,7 +226,7 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
     /**
      * Like list but returning the raw values
      */
-    fun <T: Any> listRaw(
+    fun <T : Any> listRaw(
         pathQuery: String,
         start: Int = 0,
         count: Int = Int.MAX_VALUE,
@@ -248,20 +253,26 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
      * searching for matches to the fullTextSearch term in the full text index corresponding to the
      * detail rows (not the top level list).
      */
-    fun <T: Any> listDetailsRaw(
+    fun <T : Any> listDetailsRaw(
         pathQuery: String,
         start: Int = 0,
         count: Int = Int.MAX_VALUE,
         fullTextSearch: String? = null,
         reverseSort: Boolean = false
     ): List<Detail<Raw<T>>> {
-        return Transaction(this).listDetailsRaw(pathQuery, start, count, fullTextSearch, reverseSort)
+        return Transaction(this).listDetailsRaw(
+            pathQuery,
+            start,
+            count,
+            fullTextSearch,
+            reverseSort
+        )
     }
 
     /**
      * Like listDetails but returning the raw values
      */
-    fun <T: Any> listDetails(
+    fun <T : Any> listDetails(
         pathQuery: String,
         start: Int = 0,
         count: Int = Int.MAX_VALUE,
@@ -289,6 +300,19 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
         } finally {
             db.endTransaction()
         }
+    }
+
+    /**
+     * Returns a SharedPreferences backed by this model.
+     *
+     * @param prefix - preference keys are prefixed with this for storage in the model, for example if prefix="/prefs/" and the preference key is "mypref", it would be stored at "/prefs/mypref"
+     * @param fallback - an optional fallback SharedPreferences to use for values that aren't found in the model
+     */
+    fun asSharedPreferences(
+        prefix: String = "",
+        fallback: SharedPreferences? = null
+    ): SharedPreferences {
+        return SharedPreferencesAdapter(this, prefix, fallback)
     }
 
     @Synchronized
@@ -337,7 +361,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
     /**
      * Deletes the value at the given path
      */
-    fun <T: Any> delete(path: String, extractFullText: ((T) -> String)? = null) {
+    fun <T : Any> delete(path: String, extractFullText: ((T) -> String)? = null) {
         val serializedPath = model.serde.serialize(path)
         extractFullText?.let {
             val cursor = model.db.rawQuery(
@@ -364,11 +388,11 @@ class Transaction internal constructor(private val model: ObservableModel) {
         delete<Any>(path, null)
     }
 
-    fun <T: Any> get(path: String): T? {
+    fun <T : Any> get(path: String): T? {
         return getRaw<T>(path)?.value
     }
 
-    fun <T: Any> getRaw(path: String): Raw<T>? {
+    fun <T : Any> getRaw(path: String): Raw<T>? {
         val cursor = model.db.rawQuery(
             "SELECT value FROM data WHERE path = ?", arrayOf(model.serde.serialize(path))
         )
@@ -380,7 +404,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
         }
     }
 
-    fun <T: Any> list(
+    fun <T : Any> list(
         pathQuery: String,
         start: Int = 0,
         count: Int = Int.MAX_VALUE,
@@ -394,7 +418,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
         return result
     }
 
-    fun <T: Any> listRaw(
+    fun <T : Any> listRaw(
         pathQuery: String,
         start: Int = 0,
         count: Int = Int.MAX_VALUE,
@@ -408,7 +432,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
         return result
     }
 
-    private fun <T: Any> doList(
+    private fun <T : Any> doList(
         pathQuery: String,
         start: Int,
         count: Int,
@@ -438,7 +462,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
         }
     }
 
-    fun <T: Any> listDetails(
+    fun <T : Any> listDetails(
         pathQuery: String,
         start: Int = 0,
         count: Int = Int.MAX_VALUE,
@@ -446,13 +470,19 @@ class Transaction internal constructor(private val model: ObservableModel) {
         reverseSort: Boolean = false
     ): List<Detail<T>> {
         val result = ArrayList<Detail<T>>()
-        doListDetails<T>(pathQuery, start, count, fullTextSearch, reverseSort) { listPath, detailPath, value ->
+        doListDetails<T>(
+            pathQuery,
+            start,
+            count,
+            fullTextSearch,
+            reverseSort
+        ) { listPath, detailPath, value ->
             result.add(Detail(listPath, detailPath, model.serde.deserialize(value)))
         }
         return result
     }
 
-    fun <T: Any> listDetailsRaw(
+    fun <T : Any> listDetailsRaw(
         pathQuery: String,
         start: Int = 0,
         count: Int = Int.MAX_VALUE,
@@ -460,13 +490,19 @@ class Transaction internal constructor(private val model: ObservableModel) {
         reverseSort: Boolean = false
     ): List<Detail<Raw<T>>> {
         val result = ArrayList<Detail<Raw<T>>>()
-        doListDetails<T>(pathQuery, start, count, fullTextSearch, reverseSort) { listPath, detailPath, value ->
+        doListDetails<T>(
+            pathQuery,
+            start,
+            count,
+            fullTextSearch,
+            reverseSort
+        ) { listPath, detailPath, value ->
             result.add(Detail(listPath, detailPath, Raw(model.serde, value)))
         }
         return result
     }
 
-    private fun <T: Any> doListDetails(
+    private fun <T : Any> doListDetails(
         pathQuery: String,
         start: Int,
         count: Int,
@@ -544,7 +580,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
     }
 }
 
-internal class DetailsSubscriber<T: Any>(
+internal class DetailsSubscriber<T : Any>(
     private val model: ObservableModel,
     private val originalSubscriber: RawSubscriber<T>
 ) : RawSubscriber<String>(originalSubscriber.id, *originalSubscriber.pathPrefixes) {
@@ -574,7 +610,7 @@ internal class DetailsSubscriber<T: Any>(
     }
 }
 
-internal class SubscriberForDetails<T: Any>(
+internal class SubscriberForDetails<T : Any>(
     private val originalSubscriber: RawSubscriber<T>,
     private val originalPath: String,
     detailPath: String
