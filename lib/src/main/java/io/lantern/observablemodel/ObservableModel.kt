@@ -290,13 +290,14 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
      * If the callback completes without exception, the entire transaction is committed and all
      * listeners of affected key paths are notified.
      */
-    fun mutate(fn: (tx: Transaction) -> Unit) {
+    fun <T> mutate(fn: (tx: Transaction) -> T): T {
         try {
             db.beginTransaction()
             val tx = Transaction(this)
-            fn(tx)
+            val result = fn(tx)
             db.setTransactionSuccessful()
             tx.publish()
+            return result
         } finally {
             db.endTransaction()
         }
