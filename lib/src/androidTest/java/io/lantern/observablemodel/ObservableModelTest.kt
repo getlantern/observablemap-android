@@ -15,7 +15,6 @@ import org.junit.runner.RunWith
 import java.io.IOException
 import java.nio.file.*
 import java.nio.file.attribute.BasicFileAttributes
-import javax.crypto.KeyGenerator
 
 @RunWith(AndroidJUnit4::class)
 class ObservableModelTest {
@@ -562,9 +561,6 @@ class ObservableModelTest {
     }
 
     private fun buildModel(): ObservableModel {
-        val keyGenerator = KeyGenerator.getInstance("AES")
-        keyGenerator.init(256)
-        val key = keyGenerator.generateKey()
         val model = ObservableModel.build(
             InstrumentationRegistry.getInstrumentation().targetContext,
             filePath = Paths.get(
