@@ -458,6 +458,7 @@ class ObservableModelTest {
         val model2 = buildModel()
         assertEquals("value1", model2.get<String>("path1"))
         assertEquals("value2", model2.get<String>("path2"))
+        assertTrue(model2.contains("path1"))
         assertNull("path3 should have been rolled back", model2.get("path3"))
         model2.close()
     }

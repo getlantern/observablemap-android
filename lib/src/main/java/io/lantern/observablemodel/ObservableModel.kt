@@ -200,6 +200,13 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) : Clo
     }
 
     /**
+     * Indicates whether the model contains a value at the given path
+     */
+    fun contains(path: String): Boolean {
+        return Transaction(this).contains(path)
+    }
+
+    /**
      * Lists all values matching the pathQuery. A path query is a path with '%' used as a wildcard.
      *
      * For example, given the following data:
@@ -405,19 +412,37 @@ class Transaction internal constructor(private val model: ObservableModel) {
     }
 
     fun <T : Any> get(path: String): T? {
-        return getRaw<T>(path)?.value
+        val cursor = selectSingle(path)
+        cursor.use {
+            if (cursor == null || !cursor.moveToNext()) {
+                return null
+            }
+            return model.serde.deserialize(cursor.getBlob(0))
+        }
     }
 
     fun <T : Any> getRaw(path: String): Raw<T>? {
-        val cursor = model.db.rawQuery(
-            "SELECT value FROM data WHERE path = ?", arrayOf(model.serde.serialize(path))
-        )
+        val cursor = selectSingle(path)
         cursor.use {
             if (cursor == null || !cursor.moveToNext()) {
                 return null
             }
             return Raw(model.serde, cursor.getBlob(0))
         }
+    }
+
+    fun contains(path: String): Boolean {
+        val cursor = selectSingle(path)
+        cursor.use {
+            return cursor != null && cursor.moveToNext()
+        }
+    }
+
+    private fun selectSingle(path: String): Cursor {
+        return model.db.rawQuery(
+            "SELECT value FROM data WHERE path = ?",
+            arrayOf(model.serde.serialize(path))
+        )
     }
 
     fun <T : Any> list(
