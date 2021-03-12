@@ -121,6 +121,14 @@ class ObservableModelTest {
                 .map { it.value }
         )
         assertEquals(
+            arrayListOf("Message B"),
+            model.list<String>("/messages/%", 1, 1)
+                .map { it.value }
+        )
+        assertEquals(
+            arrayListOf("/messages/b"),
+            model.listPaths("/messages/%", 1, 1))
+        assertEquals(
             0,
             model.listDetails<String>(
                 "/contacts/32af234asdf324/messages_by_timestamp/%",

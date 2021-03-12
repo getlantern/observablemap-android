@@ -6,6 +6,7 @@ import ca.gedge.radixtree.RadixTree
 import ca.gedge.radixtree.RadixTreeVisitor
 import kotlinx.collections.immutable.PersistentMap
 import kotlinx.collections.immutable.persistentHashMapOf
+import net.sqlcipher.Cursor
 import net.sqlcipher.database.SQLiteDatabase
 import java.io.Closeable
 import java.util.*
@@ -238,6 +239,19 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) : Clo
     }
 
     /**
+     * Like list but only lists the paths of matching rows.
+     */
+    fun listPaths(
+        pathQuery: String,
+        start: Int = 0,
+        count: Int = Int.MAX_VALUE,
+        fullTextSearch: String? = null,
+        reverseSort: Boolean = false
+    ): List<String> {
+        return Transaction(this).listPaths(pathQuery, start, count, fullTextSearch, reverseSort)
+    }
+
+    /**
      * Lists details for paths matching the pathQuery, where details are found by treating the
      * values of the matching paths as paths to look up the details.
      *
@@ -414,8 +428,13 @@ class Transaction internal constructor(private val model: ObservableModel) {
         reverseSort: Boolean = false
     ): List<Entry<T>> {
         val result = ArrayList<Entry<T>>()
-        doList<T>(pathQuery, start, count, fullTextSearch, reverseSort) { path, value ->
-            result.add(Entry(path, model.serde.deserialize(value)))
+        doList(pathQuery, start, count, fullTextSearch, reverseSort) { cursor ->
+            result.add(
+                Entry(
+                    model.serde.deserialize(cursor.getBlob(0)),
+                    model.serde.deserialize(cursor.getBlob(1))
+                )
+            )
         }
         return result
     }
@@ -428,19 +447,38 @@ class Transaction internal constructor(private val model: ObservableModel) {
         reverseSort: Boolean = false
     ): List<Entry<Raw<T>>> {
         val result = ArrayList<Entry<Raw<T>>>()
-        doList<T>(pathQuery, start, count, fullTextSearch, reverseSort) { path, value ->
-            result.add(Entry(path, Raw(model.serde, value)))
+        doList(pathQuery, start, count, fullTextSearch, reverseSort) { cursor ->
+            result.add(
+                Entry(
+                    model.serde.deserialize(cursor.getBlob(0)),
+                    Raw(model.serde, cursor.getBlob(1))
+                )
+            )
         }
         return result
     }
 
-    private fun <T : Any> doList(
+    fun listPaths(
+        pathQuery: String,
+        start: Int = 0,
+        count: Int = Int.MAX_VALUE,
+        fullTextSearch: String? = null,
+        reverseSort: Boolean = false
+    ): List<String> {
+        val result = ArrayList<String>()
+        doList(pathQuery, start, count, fullTextSearch, reverseSort) { cursor ->
+            result.add(model.serde.deserialize(cursor.getBlob(0)))
+        }
+        return result
+    }
+
+    private fun doList(
         pathQuery: String,
         start: Int,
         count: Int,
         fullTextSearch: String?,
         reverseSort: Boolean,
-        onResult: (path: String, value: ByteArray) -> Unit
+        onRow: (cursor: Cursor) -> Unit
     ): Unit {
         val cursor = if (fullTextSearch != null) {
             model.db.rawQuery(
@@ -455,10 +493,11 @@ class Transaction internal constructor(private val model: ObservableModel) {
             )
         }
         cursor.use {
-            val result = ArrayList<Entry<T>>()
             if (cursor != null && (start == 0 || cursor.moveToPosition(start - 1))) {
-                while (cursor.moveToNext() && result.size < count) {
-                    onResult(model.serde.deserialize(cursor.getBlob(0)), cursor.getBlob(1))
+                var results = 0
+                while (cursor.moveToNext() && results < count) {
+                    onRow(cursor)
+                    results++
                 }
             }
         }
