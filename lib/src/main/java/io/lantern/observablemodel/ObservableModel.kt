@@ -432,9 +432,12 @@ class Transaction internal constructor(private val model: ObservableModel) {
     }
 
     fun contains(path: String): Boolean {
-        val cursor = selectSingle(path)
+        val cursor = model.db.rawQuery(
+            "SELECT COUNT(path) FROM data WHERE path = ?",
+            arrayOf(model.serde.serialize(path))
+        )
         cursor.use {
-            return cursor != null && cursor.moveToNext()
+            return cursor != null && cursor.moveToNext() && cursor.getInt(0) > 0
         }
     }
 
@@ -507,22 +510,20 @@ class Transaction internal constructor(private val model: ObservableModel) {
     ): Unit {
         val cursor = if (fullTextSearch != null) {
             model.db.rawQuery(
-                "SELECT data.path, data.value FROM fts INNER JOIN data ON fts.rowid = data.rowid WHERE data.path LIKE ? AND fts.value MATCH ? ORDER BY fts.rank",
-                arrayOf(model.serde.serialize(pathQuery), fullTextSearch)
+                "SELECT data.path, data.value FROM fts INNER JOIN data ON fts.rowid = data.rowid WHERE data.path LIKE ? AND fts.value MATCH ? ORDER BY fts.rank LIMIT ? OFFSET ?",
+                arrayOf(model.serde.serialize(pathQuery), fullTextSearch, count, start)
             )
         } else {
             val sortOrder = if (reverseSort) "DESC" else "ASC"
             model.db.rawQuery(
-                "SELECT path, value FROM data WHERE path LIKE ? ORDER BY path $sortOrder",
-                arrayOf(model.serde.serialize(pathQuery))
+                "SELECT path, value FROM data WHERE path LIKE ? ORDER BY path $sortOrder LIMIT ? OFFSET ?",
+                arrayOf(model.serde.serialize(pathQuery), count, start)
             )
         }
         cursor.use {
-            if (cursor != null && (start == 0 || cursor.moveToPosition(start - 1))) {
-                var results = 0
-                while (cursor.moveToNext() && results < count) {
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
                     onRow(cursor)
-                    results++
                 }
             }
         }
@@ -578,26 +579,24 @@ class Transaction internal constructor(private val model: ObservableModel) {
     ): Unit {
         val cursor = if (fullTextSearch != null) {
             model.db.rawQuery(
-                "SELECT l.path, d.path, d.value FROM data l INNER JOIN data d ON l.value = d.path INNER JOIN fts ON fts.rowid = d.rowid WHERE l.path LIKE ? AND SUBSTR(CAST(l.value AS TEXT), 1, 1) = 'T' AND fts.value MATCH ? ORDER BY fts.rank",
-                arrayOf(model.serde.serialize(pathQuery), fullTextSearch)
+                "SELECT l.path, d.path, d.value FROM data l INNER JOIN data d ON l.value = d.path INNER JOIN fts ON fts.rowid = d.rowid WHERE l.path LIKE ? AND SUBSTR(CAST(l.value AS TEXT), 1, 1) = 'T' AND fts.value MATCH ? ORDER BY fts.rank LIMIT ? OFFSET ?",
+                arrayOf(model.serde.serialize(pathQuery), fullTextSearch, count, start)
             )
         } else {
             val sortOrder = if (reverseSort) "DESC" else "ASC"
             model.db.rawQuery(
-                "SELECT l.path, d.path, d.value FROM data l INNER JOIN data d ON l.value = d.path WHERE l.path LIKE ? AND SUBSTR(CAST(l.value AS TEXT), 1, 1) = 'T' ORDER BY l.path $sortOrder",
-                arrayOf(model.serde.serialize(pathQuery))
+                "SELECT l.path, d.path, d.value FROM data l INNER JOIN data d ON l.value = d.path WHERE l.path LIKE ? AND SUBSTR(CAST(l.value AS TEXT), 1, 1) = 'T' ORDER BY l.path $sortOrder LIMIT ? OFFSET ?",
+                arrayOf(model.serde.serialize(pathQuery), count, start)
             )
         }
         cursor.use {
-            if (cursor != null && (start == 0 || cursor.moveToPosition(start - 1))) {
-                var results = 0
-                while (cursor.moveToNext() && results < count) {
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
                     onResult(
                         model.serde.deserialize(cursor.getBlob(0)),
                         model.serde.deserialize(cursor.getBlob(1)),
                         cursor.getBlob(2)
                     )
-                    results++
                 }
             }
         }
