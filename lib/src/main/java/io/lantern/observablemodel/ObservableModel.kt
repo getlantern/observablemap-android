@@ -67,11 +67,19 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
             ctx: Context,
             filePath: String,
             password: String,
+            secureDelete: Boolean = true
         ): ObservableModel {
             SQLiteDatabase.loadLibs(ctx)
             val db = SQLiteDatabase.openOrCreateDatabase(filePath, password, null)
             if (!db.enableWriteAheadLogging()) {
                 throw Exception("Unable to enable write ahead logging")
+            }
+            if (secureDelete) {
+                // Enable secure delete
+                val cursor = db.query("PRAGMA secure_delete;")
+                if (cursor == null || !cursor.moveToNext()) {
+                    throw Exception("Unable to enable secure delete");
+                }
             }
             // All data is stored in a single table that has a TEXT path and a BLOB value
             db.execSQL("CREATE TABLE IF NOT EXISTS data ([path] TEXT PRIMARY KEY, [value] BLOB)")
