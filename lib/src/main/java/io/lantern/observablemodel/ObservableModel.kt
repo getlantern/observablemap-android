@@ -52,10 +52,9 @@ abstract class Subscriber<T : Any>(id: String, vararg pathPrefixes: String) :
  * Observable model provides a simple key/value store with a map-like interface. It allows the
  * registration of observers for any time that a key path changes.
  */
-class ObservableModel private constructor(internal val db: SQLiteDatabase) : Closeable {
+class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Serde()), Closeable {
     internal val subscribers = RadixTree<PersistentMap<String, RawSubscriber<Any>>>();
     internal val subscribersById = ConcurrentHashMap<String, RawSubscriber<Any>>()
-    internal val serde = Serde()
 
     companion object {
         /**
@@ -186,125 +185,6 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) : Clo
     }
 
     /**
-     * Gets the value at the given path
-     */
-    fun <T : Any> get(path: String): T? {
-        return Transaction(this).get(path)
-    }
-
-    /**
-     * Gets the raw value at the given path
-     */
-    fun <T : Any> getRaw(path: String): Raw<T>? {
-        return Transaction(this).getRaw(path)
-    }
-
-    /**
-     * Indicates whether the model contains a value at the given path
-     */
-    fun contains(path: String): Boolean {
-        return Transaction(this).contains(path)
-    }
-
-    /**
-     * Lists all values matching the pathQuery. A path query is a path with '%' used as a wildcard.
-     *
-     * For example, given the following data:
-     *
-     * {"/detail/1": "one",
-     *  "/detail/2": "two"}
-     *
-     * The pathQuery "/detail/%" would return ["one", "two"]
-     *
-     * By default results are sorted lexicographically by path. If reverseSort is specified, that is
-     * reversed.
-     *
-     * If fullTextSearch is specified, in addition to the pathQuery, rows will be filtered by
-     * searching for matches to the fullTextSearch term in the full text index.
-     */
-    fun <T : Any> list(
-        pathQuery: String,
-        start: Int = 0,
-        count: Int = Int.MAX_VALUE,
-        fullTextSearch: String? = null,
-        reverseSort: Boolean = false
-    ): List<Entry<T>> {
-        return Transaction(this).list(pathQuery, start, count, fullTextSearch, reverseSort)
-    }
-
-    /**
-     * Like list but returning the raw values
-     */
-    fun <T : Any> listRaw(
-        pathQuery: String,
-        start: Int = 0,
-        count: Int = Int.MAX_VALUE,
-        fullTextSearch: String? = null,
-        reverseSort: Boolean = false
-    ): List<Entry<Raw<T>>> {
-        return Transaction(this).listRaw(pathQuery, start, count, fullTextSearch, reverseSort)
-    }
-
-    /**
-     * Like list but only lists the paths of matching rows.
-     */
-    fun listPaths(
-        pathQuery: String,
-        start: Int = 0,
-        count: Int = Int.MAX_VALUE,
-        fullTextSearch: String? = null,
-        reverseSort: Boolean = false
-    ): List<String> {
-        return Transaction(this).listPaths(pathQuery, start, count, fullTextSearch, reverseSort)
-    }
-
-    /**
-     * Lists details for paths matching the pathQuery, where details are found by treating the
-     * values of the matching paths as paths to look up the details.
-     *
-     * For example, given the following data:
-     *
-     * {"/detail/1": "one",
-     *  "/detail/2": "two",
-     *  "/list/1": "/detail/2",
-     *  "/list/2": "/detail/1"}
-     *
-     * The pathQuery "/list/%" would return ["two", "one"]
-     *
-     * If fullTextSearch is specified, in addition to the pathQuery, detail rows will be filtered by
-     * searching for matches to the fullTextSearch term in the full text index corresponding to the
-     * detail rows (not the top level list).
-     */
-    fun <T : Any> listDetailsRaw(
-        pathQuery: String,
-        start: Int = 0,
-        count: Int = Int.MAX_VALUE,
-        fullTextSearch: String? = null,
-        reverseSort: Boolean = false
-    ): List<Detail<Raw<T>>> {
-        return Transaction(this).listDetailsRaw(
-            pathQuery,
-            start,
-            count,
-            fullTextSearch,
-            reverseSort
-        )
-    }
-
-    /**
-     * Like listDetails but returning the raw values
-     */
-    fun <T : Any> listDetails(
-        pathQuery: String,
-        start: Int = 0,
-        count: Int = Int.MAX_VALUE,
-        fullTextSearch: String? = null,
-        reverseSort: Boolean = false
-    ): List<Detail<T>> {
-        return Transaction(this).listDetails(pathQuery, start, count, fullTextSearch, reverseSort)
-    }
-
-    /**
      * Mutates the database inside of a transaction.
      *
      * If the callback function throws an exception, the entire transaction is rolled back.
@@ -315,7 +195,7 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) : Clo
     fun <T> mutate(fn: (tx: Transaction) -> T): T {
         try {
             db.beginTransaction()
-            val tx = Transaction(this)
+            val tx = Transaction(this.db, this.serde, this.subscribers)
             val result = fn(tx)
             db.setTransactionSuccessful()
             tx.publish()
@@ -344,7 +224,258 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) : Clo
     }
 }
 
-class Transaction internal constructor(private val model: ObservableModel) {
+open class Queryable internal constructor(
+    protected val db: SQLiteDatabase,
+    internal val serde: Serde
+) {
+    /**
+     * Gets the value at the given path
+     */
+    fun <T : Any> get(path: String): T? {
+        val cursor = selectSingle(path)
+        cursor.use {
+            if (cursor == null || !cursor.moveToNext()) {
+                return null
+            }
+            return serde.deserialize(cursor.getBlob(0))
+        }
+    }
+
+    /**
+     * Gets the raw value at the given path
+     */
+    fun <T : Any> getRaw(path: String): Raw<T>? {
+        val cursor = selectSingle(path)
+        cursor.use {
+            if (cursor == null || !cursor.moveToNext()) {
+                return null
+            }
+            return Raw(serde, cursor.getBlob(0))
+        }
+    }
+
+    /**
+     * Indicates whether the model contains a value at the given path
+     */
+    fun contains(path: String): Boolean {
+        val cursor = db.rawQuery(
+            "SELECT COUNT(path) FROM data WHERE path = ?",
+            arrayOf(serde.serialize(path))
+        )
+        cursor.use {
+            return cursor != null && cursor.moveToNext() && cursor.getInt(0) > 0
+        }
+    }
+
+    private fun selectSingle(path: String): Cursor {
+        return db.rawQuery(
+            "SELECT value FROM data WHERE path = ?",
+            arrayOf(serde.serialize(path))
+        )
+    }
+
+    /**
+     * Lists all values matching the pathQuery. A path query is a path with '%' used as a wildcard.
+     *
+     * For example, given the following data:
+     *
+     * {"/detail/1": "one",
+     *  "/detail/2": "two"}
+     *
+     * The pathQuery "/detail/%" would return ["one", "two"]
+     *
+     * By default results are sorted lexicographically by path. If reverseSort is specified, that is
+     * reversed.
+     *
+     * If fullTextSearch is specified, in addition to the pathQuery, rows will be filtered by
+     * searching for matches to the fullTextSearch term in the full text index.
+     */
+    fun <T : Any> list(
+        pathQuery: String,
+        start: Int = 0,
+        count: Int = Int.MAX_VALUE,
+        fullTextSearch: String? = null,
+        reverseSort: Boolean = false
+    ): List<Entry<T>> {
+        val result = ArrayList<Entry<T>>()
+        doList(pathQuery, start, count, fullTextSearch, reverseSort) { cursor ->
+            result.add(
+                Entry(
+                    serde.deserialize(cursor.getBlob(0)),
+                    serde.deserialize(cursor.getBlob(1))
+                )
+            )
+        }
+        return result
+    }
+
+    /**
+     * Like list but returning the raw values
+     */
+    fun <T : Any> listRaw(
+        pathQuery: String,
+        start: Int = 0,
+        count: Int = Int.MAX_VALUE,
+        fullTextSearch: String? = null,
+        reverseSort: Boolean = false
+    ): List<Entry<Raw<T>>> {
+        val result = ArrayList<Entry<Raw<T>>>()
+        doList(pathQuery, start, count, fullTextSearch, reverseSort) { cursor ->
+            result.add(
+                Entry(
+                    serde.deserialize(cursor.getBlob(0)),
+                    Raw(serde, cursor.getBlob(1))
+                )
+            )
+        }
+        return result
+    }
+
+    /**
+     * Like list but only lists the paths of matching rows.
+     */
+    fun listPaths(
+        pathQuery: String,
+        start: Int = 0,
+        count: Int = Int.MAX_VALUE,
+        fullTextSearch: String? = null,
+        reverseSort: Boolean = false
+    ): List<String> {
+        val result = ArrayList<String>()
+        doList(pathQuery, start, count, fullTextSearch, reverseSort) { cursor ->
+            result.add(serde.deserialize(cursor.getBlob(0)))
+        }
+        return result
+    }
+
+    private fun doList(
+        pathQuery: String,
+        start: Int,
+        count: Int,
+        fullTextSearch: String?,
+        reverseSort: Boolean,
+        onRow: (cursor: Cursor) -> Unit
+    ): Unit {
+        val cursor = if (fullTextSearch != null) {
+            db.rawQuery(
+                "SELECT data.path, data.value FROM fts INNER JOIN data ON fts.rowid = data.rowid WHERE data.path LIKE ? AND fts.value MATCH ? ORDER BY fts.rank LIMIT ? OFFSET ?",
+                arrayOf(serde.serialize(pathQuery), fullTextSearch, count, start)
+            )
+        } else {
+            val sortOrder = if (reverseSort) "DESC" else "ASC"
+            db.rawQuery(
+                "SELECT path, value FROM data WHERE path LIKE ? ORDER BY path $sortOrder LIMIT ? OFFSET ?",
+                arrayOf(serde.serialize(pathQuery), count, start)
+            )
+        }
+        cursor.use {
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
+                    onRow(cursor)
+                }
+            }
+        }
+    }
+
+    /**
+     * Lists details for paths matching the pathQuery, where details are found by treating the
+     * values of the matching paths as paths to look up the details.
+     *
+     * For example, given the following data:
+     *
+     * {"/detail/1": "one",
+     *  "/detail/2": "two",
+     *  "/list/1": "/detail/2",
+     *  "/list/2": "/detail/1"}
+     *
+     * The pathQuery "/list/%" would return ["two", "one"]
+     *
+     * If fullTextSearch is specified, in addition to the pathQuery, detail rows will be filtered by
+     * searching for matches to the fullTextSearch term in the full text index corresponding to the
+     * detail rows (not the top level list).
+     */
+    fun <T : Any> listDetails(
+        pathQuery: String,
+        start: Int = 0,
+        count: Int = Int.MAX_VALUE,
+        fullTextSearch: String? = null,
+        reverseSort: Boolean = false
+    ): List<Detail<T>> {
+        val result = ArrayList<Detail<T>>()
+        doListDetails<T>(
+            pathQuery,
+            start,
+            count,
+            fullTextSearch,
+            reverseSort
+        ) { listPath, detailPath, value ->
+            result.add(Detail(listPath, detailPath, serde.deserialize(value)))
+        }
+        return result
+    }
+
+    /**
+     * Like listDetails but returning the raw values
+     */
+    fun <T : Any> listDetailsRaw(
+        pathQuery: String,
+        start: Int = 0,
+        count: Int = Int.MAX_VALUE,
+        fullTextSearch: String? = null,
+        reverseSort: Boolean = false
+    ): List<Detail<Raw<T>>> {
+        val result = ArrayList<Detail<Raw<T>>>()
+        doListDetails<T>(
+            pathQuery,
+            start,
+            count,
+            fullTextSearch,
+            reverseSort
+        ) { listPath, detailPath, value ->
+            result.add(Detail(listPath, detailPath, Raw(serde, value)))
+        }
+        return result
+    }
+
+    private fun <T : Any> doListDetails(
+        pathQuery: String,
+        start: Int,
+        count: Int,
+        fullTextSearch: String?,
+        reverseSort: Boolean,
+        onResult: (listPath: String, detailPath: String, value: ByteArray) -> Unit
+    ): Unit {
+        val cursor = if (fullTextSearch != null) {
+            db.rawQuery(
+                "SELECT l.path, d.path, d.value FROM data l INNER JOIN data d ON l.value = d.path INNER JOIN fts ON fts.rowid = d.rowid WHERE l.path LIKE ? AND SUBSTR(CAST(l.value AS TEXT), 1, 1) = 'T' AND fts.value MATCH ? ORDER BY fts.rank LIMIT ? OFFSET ?",
+                arrayOf(serde.serialize(pathQuery), fullTextSearch, count, start)
+            )
+        } else {
+            val sortOrder = if (reverseSort) "DESC" else "ASC"
+            db.rawQuery(
+                "SELECT l.path, d.path, d.value FROM data l INNER JOIN data d ON l.value = d.path WHERE l.path LIKE ? AND SUBSTR(CAST(l.value AS TEXT), 1, 1) = 'T' ORDER BY l.path $sortOrder LIMIT ? OFFSET ?",
+                arrayOf(serde.serialize(pathQuery), count, start)
+            )
+        }
+        cursor.use {
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
+                    onResult(
+                        serde.deserialize(cursor.getBlob(0)),
+                        serde.deserialize(cursor.getBlob(1)),
+                        cursor.getBlob(2)
+                    )
+                }
+            }
+        }
+    }
+}
+
+class Transaction internal constructor(
+    db: SQLiteDatabase,
+    serde: Serde,
+    private val subscribers: RadixTree<PersistentMap<String, RawSubscriber<Any>>>
+) : Queryable(db, serde) {
     private val updates = HashMap<String, Raw<Any>>()
     private val deletions = TreeSet<String>()
 
@@ -354,15 +485,15 @@ class Transaction internal constructor(private val model: ObservableModel) {
      * If fullText is populated, the given data will also be full text indexed.
      */
     fun put(path: String, value: Any?, fullText: String? = null) {
-        val serializedPath = model.serde.serialize(path)
+        val serializedPath = serde.serialize(path)
         value?.let {
-            val bytes = model.serde.serialize(value)
-            model.db.execSQL(
+            val bytes = serde.serialize(value)
+            db.execSQL(
                 "INSERT INTO data(path, value) VALUES(?, ?) ON CONFLICT(path) DO UPDATE SET value = EXCLUDED.value",
                 arrayOf(serializedPath, bytes)
             )
             if (fullText != null) {
-                model.db.execSQL(
+                db.execSQL(
                     "INSERT INTO fts(rowid, value) VALUES((SELECT rowid FROM data WHERE path = ?), ?)",
                     arrayOf(serializedPath, fullText)
                 )
@@ -385,24 +516,24 @@ class Transaction internal constructor(private val model: ObservableModel) {
      * Deletes the value at the given path
      */
     fun <T : Any> delete(path: String, extractFullText: ((T) -> String)? = null) {
-        val serializedPath = model.serde.serialize(path)
+        val serializedPath = serde.serialize(path)
         extractFullText?.let {
-            val cursor = model.db.rawQuery(
+            val cursor = db.rawQuery(
                 "SELECT rowid, value FROM data WHERE path = ?", arrayOf(serializedPath)
             )
             cursor.use {
                 if (cursor != null && cursor.moveToNext()) {
-                    model.db.execSQL(
+                    db.execSQL(
                         "INSERT INTO fts(fts, rowid, value) VALUES('delete', ?, ?)",
                         arrayOf(
                             cursor.getLong(0),
-                            extractFullText(model.serde.deserialize(cursor.getBlob(1)))
+                            extractFullText(serde.deserialize(cursor.getBlob(1)))
                         )
                     )
                 }
             }
         }
-        model.db.execSQL("DELETE FROM data WHERE path = ?", arrayOf(serializedPath))
+        db.execSQL("DELETE FROM data WHERE path = ?", arrayOf(serializedPath))
         deletions += path
         updates.remove(path)
     }
@@ -411,200 +542,9 @@ class Transaction internal constructor(private val model: ObservableModel) {
         delete<Any>(path, null)
     }
 
-    fun <T : Any> get(path: String): T? {
-        val cursor = selectSingle(path)
-        cursor.use {
-            if (cursor == null || !cursor.moveToNext()) {
-                return null
-            }
-            return model.serde.deserialize(cursor.getBlob(0))
-        }
-    }
-
-    fun <T : Any> getRaw(path: String): Raw<T>? {
-        val cursor = selectSingle(path)
-        cursor.use {
-            if (cursor == null || !cursor.moveToNext()) {
-                return null
-            }
-            return Raw(model.serde, cursor.getBlob(0))
-        }
-    }
-
-    fun contains(path: String): Boolean {
-        val cursor = model.db.rawQuery(
-            "SELECT COUNT(path) FROM data WHERE path = ?",
-            arrayOf(model.serde.serialize(path))
-        )
-        cursor.use {
-            return cursor != null && cursor.moveToNext() && cursor.getInt(0) > 0
-        }
-    }
-
-    private fun selectSingle(path: String): Cursor {
-        return model.db.rawQuery(
-            "SELECT value FROM data WHERE path = ?",
-            arrayOf(model.serde.serialize(path))
-        )
-    }
-
-    fun <T : Any> list(
-        pathQuery: String,
-        start: Int = 0,
-        count: Int = Int.MAX_VALUE,
-        fullTextSearch: String? = null,
-        reverseSort: Boolean = false
-    ): List<Entry<T>> {
-        val result = ArrayList<Entry<T>>()
-        doList(pathQuery, start, count, fullTextSearch, reverseSort) { cursor ->
-            result.add(
-                Entry(
-                    model.serde.deserialize(cursor.getBlob(0)),
-                    model.serde.deserialize(cursor.getBlob(1))
-                )
-            )
-        }
-        return result
-    }
-
-    fun <T : Any> listRaw(
-        pathQuery: String,
-        start: Int = 0,
-        count: Int = Int.MAX_VALUE,
-        fullTextSearch: String? = null,
-        reverseSort: Boolean = false
-    ): List<Entry<Raw<T>>> {
-        val result = ArrayList<Entry<Raw<T>>>()
-        doList(pathQuery, start, count, fullTextSearch, reverseSort) { cursor ->
-            result.add(
-                Entry(
-                    model.serde.deserialize(cursor.getBlob(0)),
-                    Raw(model.serde, cursor.getBlob(1))
-                )
-            )
-        }
-        return result
-    }
-
-    fun listPaths(
-        pathQuery: String,
-        start: Int = 0,
-        count: Int = Int.MAX_VALUE,
-        fullTextSearch: String? = null,
-        reverseSort: Boolean = false
-    ): List<String> {
-        val result = ArrayList<String>()
-        doList(pathQuery, start, count, fullTextSearch, reverseSort) { cursor ->
-            result.add(model.serde.deserialize(cursor.getBlob(0)))
-        }
-        return result
-    }
-
-    private fun doList(
-        pathQuery: String,
-        start: Int,
-        count: Int,
-        fullTextSearch: String?,
-        reverseSort: Boolean,
-        onRow: (cursor: Cursor) -> Unit
-    ): Unit {
-        val cursor = if (fullTextSearch != null) {
-            model.db.rawQuery(
-                "SELECT data.path, data.value FROM fts INNER JOIN data ON fts.rowid = data.rowid WHERE data.path LIKE ? AND fts.value MATCH ? ORDER BY fts.rank LIMIT ? OFFSET ?",
-                arrayOf(model.serde.serialize(pathQuery), fullTextSearch, count, start)
-            )
-        } else {
-            val sortOrder = if (reverseSort) "DESC" else "ASC"
-            model.db.rawQuery(
-                "SELECT path, value FROM data WHERE path LIKE ? ORDER BY path $sortOrder LIMIT ? OFFSET ?",
-                arrayOf(model.serde.serialize(pathQuery), count, start)
-            )
-        }
-        cursor.use {
-            if (cursor != null) {
-                while (cursor.moveToNext()) {
-                    onRow(cursor)
-                }
-            }
-        }
-    }
-
-    fun <T : Any> listDetails(
-        pathQuery: String,
-        start: Int = 0,
-        count: Int = Int.MAX_VALUE,
-        fullTextSearch: String? = null,
-        reverseSort: Boolean = false
-    ): List<Detail<T>> {
-        val result = ArrayList<Detail<T>>()
-        doListDetails<T>(
-            pathQuery,
-            start,
-            count,
-            fullTextSearch,
-            reverseSort
-        ) { listPath, detailPath, value ->
-            result.add(Detail(listPath, detailPath, model.serde.deserialize(value)))
-        }
-        return result
-    }
-
-    fun <T : Any> listDetailsRaw(
-        pathQuery: String,
-        start: Int = 0,
-        count: Int = Int.MAX_VALUE,
-        fullTextSearch: String? = null,
-        reverseSort: Boolean = false
-    ): List<Detail<Raw<T>>> {
-        val result = ArrayList<Detail<Raw<T>>>()
-        doListDetails<T>(
-            pathQuery,
-            start,
-            count,
-            fullTextSearch,
-            reverseSort
-        ) { listPath, detailPath, value ->
-            result.add(Detail(listPath, detailPath, Raw(model.serde, value)))
-        }
-        return result
-    }
-
-    private fun <T : Any> doListDetails(
-        pathQuery: String,
-        start: Int,
-        count: Int,
-        fullTextSearch: String?,
-        reverseSort: Boolean,
-        onResult: (listPath: String, detailPath: String, value: ByteArray) -> Unit
-    ): Unit {
-        val cursor = if (fullTextSearch != null) {
-            model.db.rawQuery(
-                "SELECT l.path, d.path, d.value FROM data l INNER JOIN data d ON l.value = d.path INNER JOIN fts ON fts.rowid = d.rowid WHERE l.path LIKE ? AND SUBSTR(CAST(l.value AS TEXT), 1, 1) = 'T' AND fts.value MATCH ? ORDER BY fts.rank LIMIT ? OFFSET ?",
-                arrayOf(model.serde.serialize(pathQuery), fullTextSearch, count, start)
-            )
-        } else {
-            val sortOrder = if (reverseSort) "DESC" else "ASC"
-            model.db.rawQuery(
-                "SELECT l.path, d.path, d.value FROM data l INNER JOIN data d ON l.value = d.path WHERE l.path LIKE ? AND SUBSTR(CAST(l.value AS TEXT), 1, 1) = 'T' ORDER BY l.path $sortOrder LIMIT ? OFFSET ?",
-                arrayOf(model.serde.serialize(pathQuery), count, start)
-            )
-        }
-        cursor.use {
-            if (cursor != null) {
-                while (cursor.moveToNext()) {
-                    onResult(
-                        model.serde.deserialize(cursor.getBlob(0)),
-                        model.serde.deserialize(cursor.getBlob(1)),
-                        cursor.getBlob(2)
-                    )
-                }
-            }
-        }
-    }
-
     internal fun publish() {
         updates.forEach { (path, newValue) ->
-            model.subscribers.visit(object :
+            subscribers.visit(object :
                 RadixTreeVisitor<PersistentMap<String, RawSubscriber<Any>>, Void?> {
                 override fun visit(
                     key: String?,
@@ -624,7 +564,7 @@ class Transaction internal constructor(private val model: ObservableModel) {
         }
 
         deletions.forEach { path ->
-            model.subscribers.visit(object :
+            subscribers.visit(object :
                 RadixTreeVisitor<PersistentMap<String, RawSubscriber<Any>>, Void?> {
                 override fun visit(
                     key: String?,
