@@ -7,6 +7,7 @@ import ca.gedge.radixtree.RadixTreeVisitor
 import kotlinx.collections.immutable.PersistentMap
 import kotlinx.collections.immutable.persistentHashMapOf
 import net.sqlcipher.database.SQLiteDatabase
+import java.io.Closeable
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.collections.ArrayList
@@ -50,7 +51,7 @@ abstract class Subscriber<T : Any>(id: String, vararg pathPrefixes: String) :
  * Observable model provides a simple key/value store with a map-like interface. It allows the
  * registration of observers for any time that a key path changes.
  */
-class ObservableModel private constructor(internal val db: SQLiteDatabase) {
+class ObservableModel private constructor(internal val db: SQLiteDatabase) : Closeable {
     internal val subscribers = RadixTree<PersistentMap<String, RawSubscriber<Any>>>();
     internal val subscribersById = ConcurrentHashMap<String, RawSubscriber<Any>>()
     internal val serde = Serde()
@@ -317,7 +318,7 @@ class ObservableModel private constructor(internal val db: SQLiteDatabase) {
     }
 
     @Synchronized
-    fun close() {
+    override fun close() {
         db.close()
     }
 }
