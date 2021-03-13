@@ -11,6 +11,7 @@ import net.sqlcipher.database.SQLiteDatabase
 import java.io.Closeable
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.collections.ArrayList
 import kotlin.collections.HashMap
 
@@ -192,6 +193,8 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
         }
     }
 
+    val savepointSequence = AtomicInteger()
+
     /**
      * Mutates the database inside of a transaction.
      *
@@ -201,15 +204,17 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
      * listeners of affected key paths are notified.
      */
     fun <T> mutate(fn: (tx: Transaction) -> T): T {
+        val savepoint = "save_${savepointSequence.incrementAndGet()}"
         try {
-            db.beginTransaction()
+            this.db.execSQL("SAVEPOINT $savepoint")
             val tx = Transaction(this.db, this.serde, this.subscribers)
             val result = fn(tx)
-            db.setTransactionSuccessful()
             tx.publish()
+            this.db.execSQL("RELEASE $savepoint")
             return result
-        } finally {
-            db.endTransaction()
+        } catch (t: Throwable) {
+            this.db.execSQL("ROLLBACK TO $savepoint")
+            throw t
         }
     }
 

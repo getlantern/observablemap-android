@@ -569,6 +569,39 @@ class ObservableModelTest {
         assertEquals(0, updatedKeys.size)
     }
 
+    @Test
+    fun testTransactions() {
+        buildModel().use { model ->
+            val updatedPaths = HashSet<String>()
+
+            model.subscribe(object: RawSubscriber<Any>("1", "") {
+                override fun onUpdate(path: String, raw: Raw<Any>) {
+                    updatedPaths.add(path)
+                }
+
+                override fun onDelete(path: String) {
+                    TODO("Not yet implemented")
+                }
+            }, false)
+
+            model.mutate { tx ->
+                tx.put("a", "a")
+                try {
+                    model.mutate { nestedTx ->
+                        nestedTx.put("b", "b")
+                        throw Exception("I failed!")
+                    }
+                } catch (t: Throwable) {
+                    // ignore
+                }
+                tx.put("c", "c")
+            }
+
+            assertEquals(arrayListOf("a", "c"), model.listPaths("%"))
+            assertEquals(hashSetOf("a", "c"), updatedPaths)
+        }
+    }
+
     private fun buildModel(): ObservableModel {
         val model = ObservableModel.build(
             InstrumentationRegistry.getInstrumentation().targetContext,
