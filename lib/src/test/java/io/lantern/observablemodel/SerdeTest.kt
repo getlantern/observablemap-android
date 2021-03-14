@@ -2,7 +2,8 @@ package test
 
 import io.lantern.observablemodel.Serde
 import io.lantern.observablemodel.Test.TestMessage
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.charset.Charset
 
@@ -21,9 +22,9 @@ class SerdeTest {
     }
 
     @Test
-    fun testKryoWithAndWithoutRegistration() {
+    fun testKryoAndMessagePack() {
         var serde = Serde()
-        val obj = KryoMessage("name", 100)
+        val obj = MsgPackMessage("name", 100, "my data".toByteArray(Charset.defaultCharset()))
         val bytesUnregistered = serde.serialize(obj)
         assertEquals(
             "unregistered object type should be serialized with kryo",
@@ -36,26 +37,20 @@ class SerdeTest {
             serde.deserialize(bytesUnregistered)
         )
 
-        try {
-            serde.register(19, KryoMessage::class.java)
-            fail("registering an ID below 20 should have failed")
-        } catch (e: IllegalArgumentException) {
-            // expected
-        }
-        serde.register(20, KryoMessage::class.java)
+        serde.register(1, MsgPackMessage::class.java)
         val bytesRegistered = serde.serialize(obj)
         assertEquals(
-            "registered object type should be serialized with kryo",
-            'K',
+            "registered object type should be serialized with msgpack",
+            'M',
             bytesRegistered[0].toChar()
         )
         assertEquals(
-            "round-tripped registered kryo object should match original",
+            "round-tripped registered msgpack object should match original",
             obj,
             serde.deserialize(bytesRegistered)
         )
         assertEquals(
-            "round-tripped unregistered kryo object should still match original",
+            "round-tripped unregistered msgpack object should still match original",
             obj,
             serde.deserialize(bytesUnregistered)
         )
@@ -81,13 +76,7 @@ class SerdeTest {
             serde.deserialize(bytesUnregistered)
         )
 
-        try {
-            serde.register(19, TestMessage::class.java)
-            fail("registering an ID below 20 should have failed")
-        } catch (e: IllegalArgumentException) {
-            // expected
-        }
-        serde.register(20, TestMessage::class.java)
+        serde.register(1, TestMessage::class.java)
         val bytesRegistered = serde.serialize(obj)
         assertEquals(
             "registered object type should be serialized with protocol buffers",
@@ -111,4 +100,28 @@ class SerdeTest {
     }
 }
 
-private data class KryoMessage(val name: String = "", val number: Int = 0)
+private data class MsgPackMessage(
+    val name: String = "",
+    val number: Int = 0,
+    val data: ByteArray = ByteArray(0)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as MsgPackMessage
+
+        if (name != other.name) return false
+        if (number != other.number) return false
+        if (!data.contentEquals(other.data)) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = name.hashCode()
+        result = 31 * result + number
+        result = 31 * result + data.contentHashCode()
+        return result
+    }
+}

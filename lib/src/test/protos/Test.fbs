@@ -1,0 +1,6 @@
+namespace observablemodel;
+
+table TestMessage {
+    name:string;
+    value:int;
+}
