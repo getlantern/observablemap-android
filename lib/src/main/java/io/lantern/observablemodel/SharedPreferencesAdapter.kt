@@ -1,6 +1,7 @@
 package io.lantern.observablemodel
 
 import android.content.SharedPreferences
+import kotlinx.coroutines.runBlocking
 import java.util.*
 import kotlin.collections.HashMap
 
@@ -66,14 +67,14 @@ internal class SharedPreferencesAdapter(
 
     override fun registerOnSharedPreferenceChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
         val subscriber = object : Subscriber<Any>(UUID.randomUUID().toString(), prefix) {
-            override fun onUpdate(path: String, value: Any) {
+            override suspend fun onUpdate(path: String, value: Any) {
                 listener.onSharedPreferenceChanged(
                     this@SharedPreferencesAdapter,
                     unprefixedPath(path)
                 )
             }
 
-            override fun onDelete(path: String) {
+            override suspend fun onDelete(path: String) {
                 listener.onSharedPreferenceChanged(
                     this@SharedPreferencesAdapter,
                     unprefixedPath(path)
@@ -81,7 +82,9 @@ internal class SharedPreferencesAdapter(
             }
         }
         listenerIds.add(ListenerId(listener, subscriber.id))
-        model.subscribe(subscriber)
+        runBlocking {
+            model.subscribe(subscriber)
+        }
     }
 
     override fun unregisterOnSharedPreferenceChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener?) {
