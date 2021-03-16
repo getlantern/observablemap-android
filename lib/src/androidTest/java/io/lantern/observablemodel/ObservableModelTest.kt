@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -210,242 +209,230 @@ class ObservableModelTest {
 
     @Test
     fun testSubscribeDirectLate() {
-        runBlocking {
-            buildModel().use { model ->
-                var theValue = "thevalue";
+        buildModel().use { model ->
+            var theValue = "thevalue";
 
-                model.mutate { tx ->
-                    tx.put("path", theValue)
+            model.mutate { tx ->
+                tx.put("path", theValue)
+            }
+            model.subscribe(object : Subscriber<String>("100", "path") {
+                override fun onUpdate(path: String, value: String) {
+                    assertEquals("path", path)
+                    assertEquals(theValue, value)
                 }
-                model.subscribe(object : Subscriber<String>("100", "path") {
-                    override fun onUpdate(path: String, value: String) {
-                        assertEquals("path", path)
-                        assertEquals(theValue, value)
-                    }
 
-                    override fun onDelete(path: String) {
-                    }
-                })
-
-                theValue = "new value"
-                model.mutate { tx ->
-                    tx.put("path", theValue)
+                override fun onDelete(path: String) {
                 }
+            })
+
+            theValue = "new value"
+            model.mutate { tx ->
+                tx.put("path", theValue)
             }
         }
     }
 
     @Test
     fun testSubscribeDirect() {
-        runBlocking {
-            buildModel().use { model ->
-                var currentValue = "original value";
+        buildModel().use { model ->
+            var currentValue = "original value";
 
+            model.subscribe(object : Subscriber<String>("100", "path") {
+                override fun onUpdate(path: String, value: String) {
+                    fail("this subscriber was replaced and should never have been notified")
+                }
+
+                override fun onDelete(path: String) {
+                }
+            })
+
+            try {
                 model.subscribe(object : Subscriber<String>("100", "path") {
                     override fun onUpdate(path: String, value: String) {
-                        fail("this subscriber was replaced and should never have been notified")
                     }
 
                     override fun onDelete(path: String) {
                     }
                 })
-
-                try {
-                    model.subscribe(object : Subscriber<String>("100", "path") {
-                        override fun onUpdate(path: String, value: String) {
-                        }
-
-                        override fun onDelete(path: String) {
-                        }
-                    })
-                    fail("re-registering already registered subscriber ID should not be allowed")
-                } catch (e: IllegalArgumentException) {
-                    // expected
-                }
-
-                model.unsubscribe("100")
-
-                model.subscribe(object : Subscriber<String>("100", "path") {
-                    override fun onUpdate(path: String, value: String) {
-                        assertEquals("path", path)
-                        // this subscriber should only ever get the original value because we unsubscribe later
-                        assertEquals("original value", value)
-                    }
-
-                    override fun onDelete(path: String) {
-                    }
-                })
-
-                var calledDelete = false
-
-                model.subscribe(object : Subscriber<String>("101", "path") {
-                    override fun onUpdate(path: String, value: String) {
-                        assertEquals("path", path)
-                        // this subscriber should always get the current value becasue we don't unsubscribe it
-                        assertEquals(currentValue, value)
-                    }
-
-                    override fun onDelete(path: String) {
-                        assertEquals("path", path)
-                        calledDelete = true
-                    }
-                })
-
-                model.unsubscribe("100")
-
-                model.mutate { tx ->
-                    tx.put("path", currentValue)
-                }
-                currentValue = "new value"
-                model.mutate { tx ->
-                    tx.put("path", currentValue)
-                }
-
-                model.mutate { tx -> tx.delete("path") }
-                assertTrue(calledDelete)
-
+                fail("re-registering already registered subscriber ID should not be allowed")
+            } catch (e: IllegalArgumentException) {
+                // expected
             }
+
+            model.unsubscribe("100")
+
+            model.subscribe(object : Subscriber<String>("100", "path") {
+                override fun onUpdate(path: String, value: String) {
+                    assertEquals("path", path)
+                    // this subscriber should only ever get the original value because we unsubscribe later
+                    assertEquals("original value", value)
+                }
+
+                override fun onDelete(path: String) {
+                }
+            })
+
+            var calledDelete = false
+
+            model.subscribe(object : Subscriber<String>("101", "path") {
+                override fun onUpdate(path: String, value: String) {
+                    assertEquals("path", path)
+                    // this subscriber should always get the current value becasue we don't unsubscribe it
+                    assertEquals(currentValue, value)
+                }
+
+                override fun onDelete(path: String) {
+                    assertEquals("path", path)
+                    calledDelete = true
+                }
+            })
+
+            model.unsubscribe("100")
+
+            model.mutate { tx ->
+                tx.put("path", currentValue)
+            }
+            currentValue = "new value"
+            model.mutate { tx ->
+                tx.put("path", currentValue)
+            }
+
+            model.mutate { tx -> tx.delete("path") }
+            assertTrue(calledDelete)
         }
     }
 
     @Test
     fun testSubscribePrefixNoInit() {
-        runBlocking {
-            buildModel().use { model ->
-                model.mutate { tx ->
-                    tx.putAll(
-                        mapOf(
-                            "/path/1" to "1",
-                            "/path/2" to "2",
-                        )
+        buildModel().use { model ->
+            model.mutate { tx ->
+                tx.putAll(
+                    mapOf(
+                        "/path/1" to "1",
+                        "/path/2" to "2",
                     )
-                }
-
-                var updateCalled = false
-                var deleteCalled = false
-                model.subscribe(object : Subscriber<String>("100", "/path") {
-                    override fun onUpdate(path: String, value: String) {
-                        assertEquals("/path/3", path)
-                        assertEquals("3", value)
-                        updateCalled = true
-                    }
-
-                    override fun onDelete(path: String) {
-                        assertEquals("/path/1", path)
-                        deleteCalled = true
-                    }
-                }, receiveInitial = false)
-                model.subscribe(object : Subscriber<String>("101", "/pa/") {
-                    override fun onUpdate(path: String, value: String) {
-                        fail("subscriber with no common prefix shouldn't get updates")
-                    }
-
-                    override fun onDelete(path: String) {
-                        fail("subscriber with no common prefix shouldn't get deletions")
-                    }
-                }, receiveInitial = false)
-
-                model.mutate { tx ->
-                    tx.delete("/path/1")
-                    tx.put("/path/3", "3")
-                }
-
-                assertTrue(updateCalled)
-                assertTrue(deleteCalled)
-
+                )
             }
+
+            var updateCalled = false
+            var deleteCalled = false
+            model.subscribe(object : Subscriber<String>("100", "/path") {
+                override fun onUpdate(path: String, value: String) {
+                    assertEquals("/path/3", path)
+                    assertEquals("3", value)
+                    updateCalled = true
+                }
+
+                override fun onDelete(path: String) {
+                    assertEquals("/path/1", path)
+                    deleteCalled = true
+                }
+            }, receiveInitial = false)
+            model.subscribe(object : Subscriber<String>("101", "/pa/") {
+                override fun onUpdate(path: String, value: String) {
+                    fail("subscriber with no common prefix shouldn't get updates")
+                }
+
+                override fun onDelete(path: String) {
+                    fail("subscriber with no common prefix shouldn't get deletions")
+                }
+            }, receiveInitial = false)
+
+            model.mutate { tx ->
+                tx.delete("/path/1")
+                tx.put("/path/3", "3")
+            }
+
+            assertTrue(updateCalled)
+            assertTrue(deleteCalled)
         }
     }
 
     @Test
     fun testSubscribePrefixInit() {
-        runBlocking {
-            buildModel().use { model ->
-                model.mutate { tx ->
-                    tx.putAll(
-                        mapOf(
-                            "/path/1" to "1",
-                            "/path/2" to "2",
-                            "/pa/1" to "1",
-                        )
+        buildModel().use { model ->
+            model.mutate { tx ->
+                tx.putAll(
+                    mapOf(
+                        "/path/1" to "1",
+                        "/path/2" to "2",
+                        "/pa/1" to "1",
                     )
+                )
+            }
+
+            var updates = 0
+            model.subscribe(object : Subscriber<String>("100", "/path") {
+                override fun onUpdate(path: String, value: String) {
+                    assertTrue(path.startsWith("/path/"))
+                    assertEquals(path.substring(path.length - 1), value)
+                    updates += 1
                 }
 
-                var updates = 0
-                model.subscribe(object : Subscriber<String>("100", "/path") {
-                    override fun onUpdate(path: String, value: String) {
-                        assertTrue(path.startsWith("/path/"))
-                        assertEquals(path.substring(path.length - 1), value)
-                        updates += 1
-                    }
+                override fun onDelete(path: String) {
+                }
+            })
 
-                    override fun onDelete(path: String) {
-                    }
-                })
-
-                assertEquals(2, updates)
-            }
+            assertEquals(2, updates)
         }
     }
 
     @Test
     fun testSubscribeDetailsPrefixInit() {
-        runBlocking {
-            buildModel().use { model ->
-                model.mutate { tx ->
-                    tx.putAll(
-                        mapOf(
-                            "/detail/1" to "1",
-                            "/detail/2" to "2",
-                            "/list/1" to "/detail/2",
-                            "/list/2" to "/detail/1"
-                        )
+        buildModel().use { model ->
+            model.mutate { tx ->
+                tx.putAll(
+                    mapOf(
+                        "/detail/1" to "1",
+                        "/detail/2" to "2",
+                        "/list/1" to "/detail/2",
+                        "/list/2" to "/detail/1"
                     )
-                }
-
-                val updates = HashSet<Entry<String>>()
-                val deletions = HashSet<String>()
-
-                model.subscribeDetails(object : Subscriber<String>("100", "/list/") {
-                    override fun onUpdate(path: String, value: String) {
-                        updates.add(Entry(path, value))
-                    }
-
-                    override fun onDelete(path: String) {
-                        deletions.add(path)
-                    }
-                })
-
-                model.mutate { tx ->
-                    tx.put("/detail/1", "11")
-                    tx.put("/list/3", "/detail/3")
-                    tx.put("/detail/3", "3")
-                    tx.put(
-                        "/list/4",
-                        "/detail/unknown"
-                    ) // since this doesn't have details, we shouldn't get notified about it
-                    tx.put(
-                        "/detail/4",
-                        "4"
-                    ) // since this detail doesn't link back to a path in the list, we shouldn't get notified about it
-                }
-
-                model.mutate { tx ->
-                    tx.delete("/detail/2") // should show up as a deletion of /list/2
-                    tx.delete("/list/2")
-                }
-
-                assertEquals(
-                    setOf(
-                        Entry("/list/1", "2"),
-                        Entry("/list/2", "11"),
-                        Entry("/list/2", "1"),
-                        Entry("/list/3", "3"),
-                    ), updates
                 )
-
-                assertEquals(setOf("/list/1", "/list/2"), deletions)
             }
+
+            val updates = HashSet<Entry<String>>()
+            val deletions = HashSet<String>()
+
+            model.subscribeDetails(object : Subscriber<String>("100", "/list/") {
+                override fun onUpdate(path: String, value: String) {
+                    updates.add(Entry(path, value))
+                }
+
+                override fun onDelete(path: String) {
+                    deletions.add(path)
+                }
+            })
+
+            model.mutate { tx ->
+                tx.put("/detail/1", "11")
+                tx.put("/list/3", "/detail/3")
+                tx.put("/detail/3", "3")
+                tx.put(
+                    "/list/4",
+                    "/detail/unknown"
+                ) // since this doesn't have details, we shouldn't get notified about it
+                tx.put(
+                    "/detail/4",
+                    "4"
+                ) // since this detail doesn't link back to a path in the list, we shouldn't get notified about it
+            }
+
+            model.mutate { tx ->
+                tx.delete("/detail/2") // should show up as a deletion of /list/2
+                tx.delete("/list/2")
+            }
+
+            assertEquals(
+                setOf(
+                    Entry("/list/1", "2"),
+                    Entry("/list/2", "11"),
+                    Entry("/list/2", "1"),
+                    Entry("/list/3", "3"),
+                ), updates
+            )
+
+            assertEquals(setOf("/list/1", "/list/2"), deletions)
         }
     }
 
@@ -587,36 +574,34 @@ class ObservableModelTest {
 
     @Test
     fun testTransactions() {
-        runBlocking {
-            buildModel().use { model ->
-                val updatedPaths = HashSet<String>()
+        buildModel().use { model ->
+            val updatedPaths = HashSet<String>()
 
-                model.subscribe(object : RawSubscriber<Any>("1", "") {
-                    override fun onUpdate(path: String, raw: Raw<Any>) {
-                        updatedPaths.add(path)
-                    }
-
-                    override fun onDelete(path: String) {
-                        TODO("Not yet implemented")
-                    }
-                }, false)
-
-                model.mutate { tx ->
-                    tx.put("a", "a")
-                    try {
-                        model.mutate { nestedTx ->
-                            nestedTx.put("b", "b")
-                            throw Exception("I failed!")
-                        }
-                    } catch (t: Throwable) {
-                        // ignore
-                    }
-                    tx.put("c", "c")
+            model.subscribe(object : RawSubscriber<Any>("1", "") {
+                override fun onUpdate(path: String, raw: Raw<Any>) {
+                    updatedPaths.add(path)
                 }
 
-                assertEquals(arrayListOf("a", "c"), model.listPaths("%"))
-                assertEquals(hashSetOf("a", "c"), updatedPaths)
+                override fun onDelete(path: String) {
+                    TODO("Not yet implemented")
+                }
+            }, false)
+
+            model.mutate { tx ->
+                tx.put("a", "a")
+                try {
+                    model.mutate { nestedTx ->
+                        nestedTx.put("b", "b")
+                        throw Exception("I failed!")
+                    }
+                } catch (t: Throwable) {
+                    // ignore
+                }
+                tx.put("c", "c")
             }
+
+            assertEquals(arrayListOf("a", "c"), model.listPaths("%"))
+            assertEquals(hashSetOf("a", "c"), updatedPaths)
         }
     }
 

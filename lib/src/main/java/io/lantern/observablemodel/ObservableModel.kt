@@ -54,7 +54,7 @@ abstract class Subscriber<T : Any>(id: String, vararg pathPrefixes: String) :
  * registration of observers for any time that a key path changes.
  */
 class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Serde()), Closeable {
-    internal val subscribers = RadixTree<PersistentMap<String, RawSubscriber<Any>>>();
+    internal val subscribers = RadixTree<PersistentMap<String, RawSubscriber<Any>>>()
     internal val subscribersById = ConcurrentHashMap<String, RawSubscriber<Any>>()
 
     companion object {
@@ -79,7 +79,7 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
                 // Enable secure delete
                 val cursor = db.query("PRAGMA secure_delete;")
                 if (cursor == null || !cursor.moveToNext()) {
-                    throw Exception("Unable to enable secure delete");
+                    throw Exception("Unable to enable secure delete")
                 }
             }
             // All data is stored in a single table that has a TEXT path and a BLOB value
@@ -206,32 +206,14 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
     fun <T> mutate(fn: (tx: Transaction) -> T): T {
         val savepoint = "save_${savepointSequence.incrementAndGet()}"
         try {
-            this.db.execSQL("SAVEPOINT $savepoint")
-            val tx = Transaction(this.db, this.serde, this.subscribers)
+            db.execSQL("SAVEPOINT $savepoint")
+            val tx = Transaction(db, serde, subscribers)
             val result = fn(tx)
             tx.publish()
-            this.db.execSQL("RELEASE $savepoint")
+            db.execSQL("RELEASE $savepoint")
             return result
         } catch (t: Throwable) {
-            this.db.execSQL("ROLLBACK TO $savepoint")
-            throw t
-        }
-    }
-
-    /**
-     * Like mutate but suspending for use in coroutines
-     */
-    suspend fun <T> smutate(fn: suspend (tx: Transaction) -> T): T {
-        val savepoint = "save_${savepointSequence.incrementAndGet()}"
-        try {
-            this.db.execSQL("SAVEPOINT $savepoint")
-            val tx = Transaction(this.db, this.serde, this.subscribers)
-            val result = fn(tx)
-            tx.publish()
-            this.db.execSQL("RELEASE $savepoint")
-            return result
-        } catch (t: Throwable) {
-            this.db.execSQL("ROLLBACK TO $savepoint")
+            db.execSQL("ROLLBACK TO $savepoint")
             throw t
         }
     }
@@ -624,7 +606,7 @@ internal class DetailsSubscriber<T : Any>(
 
     @Synchronized
     override fun onUpdate(path: String, raw: Raw<String>) {
-        val detailPath = raw.value;
+        val detailPath = raw.value
         val newValue = model.getRaw<T>(detailPath)
         if (newValue != null) {
             onUpdate(path, detailPath, newValue)
