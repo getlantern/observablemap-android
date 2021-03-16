@@ -218,12 +218,12 @@ class ObservableModelTest {
                     tx.put("path", theValue)
                 }
                 model.subscribe(object : Subscriber<String>("100", "path") {
-                    override suspend fun onUpdate(path: String, value: String) {
+                    override fun onUpdate(path: String, value: String) {
                         assertEquals("path", path)
                         assertEquals(theValue, value)
                     }
 
-                    override suspend fun onDelete(path: String) {
+                    override fun onDelete(path: String) {
                     }
                 })
 
@@ -242,20 +242,20 @@ class ObservableModelTest {
                 var currentValue = "original value";
 
                 model.subscribe(object : Subscriber<String>("100", "path") {
-                    override suspend fun onUpdate(path: String, value: String) {
+                    override fun onUpdate(path: String, value: String) {
                         fail("this subscriber was replaced and should never have been notified")
                     }
 
-                    override suspend fun onDelete(path: String) {
+                    override fun onDelete(path: String) {
                     }
                 })
 
                 try {
                     model.subscribe(object : Subscriber<String>("100", "path") {
-                        override suspend fun onUpdate(path: String, value: String) {
+                        override fun onUpdate(path: String, value: String) {
                         }
 
-                        override suspend fun onDelete(path: String) {
+                        override fun onDelete(path: String) {
                         }
                     })
                     fail("re-registering already registered subscriber ID should not be allowed")
@@ -266,26 +266,26 @@ class ObservableModelTest {
                 model.unsubscribe("100")
 
                 model.subscribe(object : Subscriber<String>("100", "path") {
-                    override suspend fun onUpdate(path: String, value: String) {
+                    override fun onUpdate(path: String, value: String) {
                         assertEquals("path", path)
                         // this subscriber should only ever get the original value because we unsubscribe later
                         assertEquals("original value", value)
                     }
 
-                    override suspend fun onDelete(path: String) {
+                    override fun onDelete(path: String) {
                     }
                 })
 
                 var calledDelete = false
 
                 model.subscribe(object : Subscriber<String>("101", "path") {
-                    override suspend fun onUpdate(path: String, value: String) {
+                    override fun onUpdate(path: String, value: String) {
                         assertEquals("path", path)
                         // this subscriber should always get the current value becasue we don't unsubscribe it
                         assertEquals(currentValue, value)
                     }
 
-                    override suspend fun onDelete(path: String) {
+                    override fun onDelete(path: String) {
                         assertEquals("path", path)
                         calledDelete = true
                     }
@@ -324,23 +324,23 @@ class ObservableModelTest {
                 var updateCalled = false
                 var deleteCalled = false
                 model.subscribe(object : Subscriber<String>("100", "/path") {
-                    override suspend fun onUpdate(path: String, value: String) {
+                    override fun onUpdate(path: String, value: String) {
                         assertEquals("/path/3", path)
                         assertEquals("3", value)
                         updateCalled = true
                     }
 
-                    override suspend fun onDelete(path: String) {
+                    override fun onDelete(path: String) {
                         assertEquals("/path/1", path)
                         deleteCalled = true
                     }
                 }, receiveInitial = false)
                 model.subscribe(object : Subscriber<String>("101", "/pa/") {
-                    override suspend fun onUpdate(path: String, value: String) {
+                    override fun onUpdate(path: String, value: String) {
                         fail("subscriber with no common prefix shouldn't get updates")
                     }
 
-                    override suspend fun onDelete(path: String) {
+                    override fun onDelete(path: String) {
                         fail("subscriber with no common prefix shouldn't get deletions")
                     }
                 }, receiveInitial = false)
@@ -373,13 +373,13 @@ class ObservableModelTest {
 
                 var updates = 0
                 model.subscribe(object : Subscriber<String>("100", "/path") {
-                    override suspend fun onUpdate(path: String, value: String) {
+                    override fun onUpdate(path: String, value: String) {
                         assertTrue(path.startsWith("/path/"))
                         assertEquals(path.substring(path.length - 1), value)
                         updates += 1
                     }
 
-                    override suspend fun onDelete(path: String) {
+                    override fun onDelete(path: String) {
                     }
                 })
 
@@ -407,11 +407,11 @@ class ObservableModelTest {
                 val deletions = HashSet<String>()
 
                 model.subscribeDetails(object : Subscriber<String>("100", "/list/") {
-                    override suspend fun onUpdate(path: String, value: String) {
+                    override fun onUpdate(path: String, value: String) {
                         updates.add(Entry(path, value))
                     }
 
-                    override suspend fun onDelete(path: String) {
+                    override fun onDelete(path: String) {
                         deletions.add(path)
                     }
                 })
@@ -592,11 +592,11 @@ class ObservableModelTest {
                 val updatedPaths = HashSet<String>()
 
                 model.subscribe(object : RawSubscriber<Any>("1", "") {
-                    override suspend fun onUpdate(path: String, raw: Raw<Any>) {
+                    override fun onUpdate(path: String, raw: Raw<Any>) {
                         updatedPaths.add(path)
                     }
 
-                    override suspend fun onDelete(path: String) {
+                    override fun onDelete(path: String) {
                         TODO("Not yet implemented")
                     }
                 }, false)

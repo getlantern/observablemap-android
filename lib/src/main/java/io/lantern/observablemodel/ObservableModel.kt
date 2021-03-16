@@ -6,7 +6,6 @@ import ca.gedge.radixtree.RadixTree
 import ca.gedge.radixtree.RadixTreeVisitor
 import kotlinx.collections.immutable.PersistentMap
 import kotlinx.collections.immutable.persistentHashMapOf
-import kotlinx.coroutines.runBlocking
 import net.sqlcipher.Cursor
 import net.sqlcipher.database.SQLiteDatabase
 import java.io.Closeable
@@ -33,21 +32,21 @@ abstract class RawSubscriber<T : Any>(
     /**
      * Called when the value at the given path changes
      */
-    abstract suspend fun onUpdate(path: String, raw: Raw<T>)
+    abstract fun onUpdate(path: String, raw: Raw<T>)
 
     /**
      * Called when the value at the given path is deleted
      */
-    abstract suspend fun onDelete(path: String)
+    abstract fun onDelete(path: String)
 }
 
 abstract class Subscriber<T : Any>(id: String, vararg pathPrefixes: String) :
     RawSubscriber<T>(id, *pathPrefixes) {
-    override suspend fun onUpdate(path: String, raw: Raw<T>) {
+    override fun onUpdate(path: String, raw: Raw<T>) {
         onUpdate(path, raw.value)
     }
 
-    abstract suspend fun onUpdate(path: String, value: T)
+    abstract fun onUpdate(path: String, value: T)
 }
 
 /**
@@ -113,7 +112,7 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
      * If receiveInitial is true, the subscriber will immediately be called for all matching values.
      */
     @Synchronized
-    suspend fun <T : Any> subscribe(
+    fun <T : Any> subscribe(
         subscriber: RawSubscriber<T>,
         receiveInitial: Boolean = true
     ) {
@@ -155,7 +154,7 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
      * is deleted from /list/.
      */
     @Synchronized
-    suspend fun <T : Any> subscribeDetails(
+    fun <T : Any> subscribeDetails(
         subscriber: RawSubscriber<T>,
         receiveInitial: Boolean = true
     ) {
@@ -210,9 +209,7 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
             this.db.execSQL("SAVEPOINT $savepoint")
             val tx = Transaction(this.db, this.serde, this.subscribers)
             val result = fn(tx)
-            runBlocking {
-                tx.publish()
-            }
+            tx.publish()
             this.db.execSQL("RELEASE $savepoint")
             return result
         } catch (t: Throwable) {
@@ -222,7 +219,7 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
     }
 
     /**
-     * Like mutate but blocking for use outside coroutines
+     * Like mutate but suspending for use in coroutines
      */
     suspend fun <T> smutate(fn: suspend (tx: Transaction) -> T): T {
         val savepoint = "save_${savepointSequence.incrementAndGet()}"
@@ -252,6 +249,7 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
         return SharedPreferencesAdapter(this, prefix, fallback)
     }
 
+    @Synchronized
     override fun close() {
         db.close()
     }
@@ -575,9 +573,8 @@ class Transaction internal constructor(
         delete<Any>(path, null)
     }
 
-    internal suspend fun publish() {
+    internal fun publish() {
         updates.forEach { (path, newValue) ->
-            val matchingSubscribers = ArrayList<RawSubscriber<Any>>()
             subscribers.visit(object :
                 RadixTreeVisitor<PersistentMap<String, RawSubscriber<Any>>, Void?> {
                 override fun visit(
@@ -587,7 +584,7 @@ class Transaction internal constructor(
                     if (key == null || !path.startsWith(key)) {
                         return false
                     }
-                    value?.values?.forEach { matchingSubscribers.add(it) }
+                    value?.values?.forEach { it.onUpdate(path, newValue) }
                     return true
                 }
 
@@ -595,11 +592,9 @@ class Transaction internal constructor(
                     return null
                 }
             })
-            matchingSubscribers.forEach { it.onUpdate(path, newValue) }
         }
 
         deletions.forEach { path ->
-            val matchingSubscribers = ArrayList<RawSubscriber<Any>>()
             subscribers.visit(object :
                 RadixTreeVisitor<PersistentMap<String, RawSubscriber<Any>>, Void?> {
                 override fun visit(
@@ -609,7 +604,7 @@ class Transaction internal constructor(
                     if (key == null || !path.startsWith(key)) {
                         return false
                     }
-                    value?.values?.forEach { matchingSubscribers.add(it) }
+                    value?.values?.forEach { it.onDelete(path) }
                     return true
                 }
 
@@ -617,7 +612,6 @@ class Transaction internal constructor(
                     return null
                 }
             })
-            matchingSubscribers.forEach { it.onDelete(path) }
         }
     }
 }
@@ -628,7 +622,8 @@ internal class DetailsSubscriber<T : Any>(
 ) : RawSubscriber<String>(originalSubscriber.id, *originalSubscriber.pathPrefixes) {
     internal val subscribersForDetails = ConcurrentHashMap<String, RawSubscriber<T>>()
 
-    override suspend fun onUpdate(path: String, raw: Raw<String>) {
+    @Synchronized
+    override fun onUpdate(path: String, raw: Raw<String>) {
         val detailPath = raw.value;
         val newValue = model.getRaw<T>(detailPath)
         if (newValue != null) {
@@ -636,7 +631,7 @@ internal class DetailsSubscriber<T : Any>(
         }
     }
 
-    internal suspend fun onUpdate(path: String, detailPath: String, value: Raw<T>) {
+    internal fun onUpdate(path: String, detailPath: String, value: Raw<T>) {
         if (!subscribersForDetails.contains(path)) {
             val subscriberForDetails = SubscriberForDetails<T>(originalSubscriber, path, detailPath)
             subscribersForDetails[path] = subscriberForDetails
@@ -645,7 +640,7 @@ internal class DetailsSubscriber<T : Any>(
         originalSubscriber.onUpdate(path, value)
     }
 
-    override suspend fun onDelete(path: String) {
+    override fun onDelete(path: String) {
         subscribersForDetails.remove(path)?.let { model.unsubscribe(it.id) }
         originalSubscriber.onDelete(path)
     }
@@ -656,11 +651,11 @@ internal class SubscriberForDetails<T : Any>(
     private val originalPath: String,
     detailPath: String
 ) : RawSubscriber<T>("${originalSubscriber.id}/${detailPath}", detailPath) {
-    override suspend fun onUpdate(path: String, raw: Raw<T>) {
+    override fun onUpdate(path: String, raw: Raw<T>) {
         originalSubscriber.onUpdate(originalPath, raw)
     }
 
-    override suspend fun onDelete(path: String) {
+    override fun onDelete(path: String) {
         originalSubscriber.onDelete(originalPath)
     }
 }
