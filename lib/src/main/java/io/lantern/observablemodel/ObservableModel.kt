@@ -203,6 +203,7 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
      * If the callback completes without exception, the entire transaction is committed and all
      * listeners of affected key paths are notified.
      */
+    @Synchronized
     fun <T> mutate(fn: (tx: Transaction) -> T): T {
         val savepoint = "save_${savepointSequence.incrementAndGet()}"
         try {
