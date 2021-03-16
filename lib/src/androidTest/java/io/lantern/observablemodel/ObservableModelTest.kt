@@ -587,21 +587,33 @@ class ObservableModelTest {
                 }
             }, false)
 
-            model.mutate { tx ->
-                tx.put("a", "a")
-                try {
-                    model.mutate { nestedTx ->
-                        nestedTx.put("b", "b")
-                        throw Exception("I failed!")
+            val result = model.mutate { tx ->
+                tx.put("a", "a") // this should persist to the db
+                val c = model.mutate { nestedTx ->
+                    try {
+                        // None of the below should persist to the db
+                        model.mutate { subNestedTx ->
+                            subNestedTx.put("b", "b")
+                            model.mutate { subSubNestedTx ->
+                                subSubNestedTx.put("f", "f")
+                            }
+                            throw Exception("I failed!")
+                        }
+                    } catch (t: Throwable) {
+                        // ignore
                     }
-                } catch (t: Throwable) {
-                    // ignore
+                    nestedTx.put("c", "c")
+                    "c"
                 }
-                tx.put("c", "c")
+
+                tx.put("d", c) // this should persist to the db
+                "e"
             }
 
-            assertEquals(arrayListOf("a", "c"), model.listPaths("%"))
-            assertEquals(hashSetOf("a", "c"), updatedPaths)
+            assertEquals("e", result)
+            assertEquals(arrayListOf("a", "c", "d"), model.listPaths("%"))
+            assertEquals(hashSetOf("a", "c", "d"), updatedPaths)
+            assertEquals("c", model.get("d"))
         }
     }
 

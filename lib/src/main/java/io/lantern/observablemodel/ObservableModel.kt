@@ -10,7 +10,9 @@ import net.sqlcipher.Cursor
 import net.sqlcipher.database.SQLiteDatabase
 import java.io.Closeable
 import java.util.*
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.collections.ArrayList
 import kotlin.collections.HashMap
@@ -56,6 +58,8 @@ abstract class Subscriber<T : Any>(id: String, vararg pathPrefixes: String) :
 class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Serde()), Closeable {
     internal val subscribers = RadixTree<PersistentMap<String, RawSubscriber<Any>>>()
     internal val subscribersById = ConcurrentHashMap<String, RawSubscriber<Any>>()
+    private val txExecutor = Executors.newSingleThreadExecutor()
+    private val currentTransaction = ThreadLocal<Transaction>()
 
     companion object {
         /**
@@ -193,7 +197,7 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
         }
     }
 
-    val savepointSequence = AtomicInteger()
+    private val savepointSequence = AtomicInteger()
 
     /**
      * Mutates the database inside of a transaction.
@@ -202,20 +206,53 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
      *
      * If the callback completes without exception, the entire transaction is committed and all
      * listeners of affected key paths are notified.
+     *
+     * All mutating happens on a single thread. Nested calls to mutate are allowed and will
+     * each get their own sub-transaction implemented using savepoints.
      */
-    @Synchronized
     fun <T> mutate(fn: (tx: Transaction) -> T): T {
-        val savepoint = "save_${savepointSequence.incrementAndGet()}"
-        try {
-            db.execSQL("SAVEPOINT $savepoint")
-            val tx = Transaction(db, serde, subscribers)
-            val result = fn(tx)
-            tx.publish()
-            db.execSQL("RELEASE $savepoint")
-            return result
-        } catch (t: Throwable) {
-            db.execSQL("ROLLBACK TO $savepoint")
-            throw t
+        var inExecutor = false
+        val tx = synchronized(this) {
+            val _tx = currentTransaction.get()
+            if (_tx == null) {
+                Transaction(db, serde, subscribers)
+            } else {
+                inExecutor = true
+                _tx
+            }
+        }
+
+        return if (inExecutor) {
+            // we're already in the executor thread, do the work with a savepoint
+            val nestedTx = Transaction(db, serde, subscribers, tx.updates, tx.deletions, "save_${savepointSequence.incrementAndGet()}")
+            try {
+                nestedTx.beginSavepoint()
+                currentTransaction.set(nestedTx)
+                val result = fn(nestedTx)
+                nestedTx.setSavepointSuccessful()
+                result
+            } finally {
+                nestedTx.endSavepoint()
+                currentTransaction.set(tx)
+            }
+        } else {
+            // schedule the work to run in our single threaded executor
+            val future = txExecutor.submit(object: Callable<T> {
+                override fun call(): T {
+                    try {
+                        db.beginTransaction()
+                        currentTransaction.set(tx)
+                        val result = fn(tx)
+                        db.setTransactionSuccessful()
+                        tx.publish()
+                        return result
+                    } finally {
+                        db.endTransaction()
+                        currentTransaction.remove()
+                    }
+                }
+            })
+            return future.get()
         }
     }
 
@@ -488,10 +525,31 @@ open class Queryable internal constructor(
 class Transaction internal constructor(
     db: SQLiteDatabase,
     serde: Serde,
-    private val subscribers: RadixTree<PersistentMap<String, RawSubscriber<Any>>>
+    private val subscribers: RadixTree<PersistentMap<String, RawSubscriber<Any>>>,
+    private val parentUpdates: HashMap<String, Raw<Any>>? = null,
+    private val parentDeletions: TreeSet<String>? = null,
+    private val savepoint: String? = null,
 ) : Queryable(db, serde) {
-    private val updates = HashMap<String, Raw<Any>>()
-    private val deletions = TreeSet<String>()
+    internal val updates = HashMap<String, Raw<Any>>()
+    internal val deletions = TreeSet<String>()
+    private var savepointSuccessful = false
+
+    internal fun beginSavepoint() {
+        db.execSQL("SAVEPOINT $savepoint")
+    }
+
+    internal fun setSavepointSuccessful() {
+        savepointSuccessful = true
+    }
+
+    internal fun endSavepoint() {
+        this.db.execSQL(if (savepointSuccessful) "RELEASE $savepoint" else "ROLLBACK TO $savepoint")
+        if (savepointSuccessful) {
+            // merge updates and deletions into parent
+            parentUpdates?.putAll(updates)
+            parentDeletions?.addAll(deletions)
+        }
+    }
 
     /**
      * Puts the given value at the given path. If the value is null, the path is deleted.
@@ -513,7 +571,7 @@ class Transaction internal constructor(
                 )
             }
             updates[path] = Raw(bytes, value)
-            deletions -= path
+            deletions!! -= path
         } ?: run {
             delete(path)
         }
@@ -548,7 +606,7 @@ class Transaction internal constructor(
             }
         }
         db.execSQL("DELETE FROM data WHERE path = ?", arrayOf(serializedPath))
-        deletions += path
+        deletions!! += path
         updates.remove(path)
     }
 
