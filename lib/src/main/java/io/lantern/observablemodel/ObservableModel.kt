@@ -60,6 +60,7 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
     internal val subscribersById = ConcurrentHashMap<String, RawSubscriber<Any>>()
     private val txExecutor = Executors.newSingleThreadExecutor()
     private val currentTransaction = ThreadLocal<Transaction>()
+    private val savepointSequence = AtomicInteger()
 
     companion object {
         /**
@@ -197,8 +198,6 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
         }
     }
 
-    private val savepointSequence = AtomicInteger()
-
     /**
      * Mutates the database inside of a transaction.
      *
@@ -224,7 +223,14 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
 
         return if (inExecutor) {
             // we're already in the executor thread, do the work with a savepoint
-            val nestedTx = Transaction(db, serde, subscribers, tx.updates, tx.deletions, "save_${savepointSequence.incrementAndGet()}")
+            val nestedTx = Transaction(
+                db,
+                serde,
+                subscribers,
+                tx.updates,
+                tx.deletions,
+                "save_${savepointSequence.incrementAndGet()}"
+            )
             try {
                 nestedTx.beginSavepoint()
                 currentTransaction.set(nestedTx)
@@ -237,7 +243,7 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
             }
         } else {
             // schedule the work to run in our single threaded executor
-            val future = txExecutor.submit(object: Callable<T> {
+            val future = txExecutor.submit(object : Callable<T> {
                 override fun call(): T {
                     try {
                         db.beginTransaction()
@@ -271,6 +277,7 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
 
     @Synchronized
     override fun close() {
+        txExecutor.shutdownNow()
         db.close()
     }
 }
