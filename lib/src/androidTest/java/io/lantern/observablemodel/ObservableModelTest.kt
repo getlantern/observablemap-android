@@ -255,8 +255,8 @@ class ObservableModelTest {
                     }
                 })
                 fail("re-registering already registered subscriber ID should not be allowed")
-            } catch (e: IllegalArgumentException) {
-                // expected
+            } catch (e: Exception) {
+                assertTrue(e.cause is IllegalArgumentException)
             }
 
             model.unsubscribe("100")

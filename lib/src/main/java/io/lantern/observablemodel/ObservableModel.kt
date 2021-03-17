@@ -117,12 +117,25 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
      *
      * If receiveInitial is true, the subscriber will immediately be called for all matching values.
      */
-    @Synchronized
     fun <T : Any> subscribe(
         subscriber: RawSubscriber<T>,
         receiveInitial: Boolean = true
     ) {
-        if (subscribersById.putIfAbsent(subscriber.id, subscriber as RawSubscriber<Any>) != null) {
+        txExecutor.submit(Callable<Void> {
+            doSubscribe(subscriber, receiveInitial)
+            null
+        }).get()
+    }
+
+    internal fun <T : Any> doSubscribe(
+        subscriber: RawSubscriber<T>,
+        receiveInitial: Boolean = true
+    ) {
+        if (subscribersById.putIfAbsent(
+                subscriber.id,
+                subscriber as RawSubscriber<Any>
+            ) != null
+        ) {
             throw IllegalArgumentException("subscriber with id ${subscriber.id} already registered")
         }
         subscriber.pathPrefixes.forEach { pathPrefix ->
@@ -159,44 +172,48 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
      * if the paths /detail/1 or /detail/2 change, or if a new item is added to /list/ or an item
      * is deleted from /list/.
      */
-    @Synchronized
     fun <T : Any> subscribeDetails(
         subscriber: RawSubscriber<T>,
         receiveInitial: Boolean = true
     ) {
-        val detailsSubscriber = DetailsSubscriber(this, subscriber)
-        subscribe(detailsSubscriber, receiveInitial = false)
-        if (receiveInitial) {
-            subscriber.pathPrefixes.forEach { pathPrefix ->
-                listDetailsRaw<T>("${pathPrefix}%").forEach {
-                    detailsSubscriber.onUpdate(it.path, it.detailPath, it.value)
+        txExecutor.submit(Callable<Void> {
+            val detailsSubscriber = DetailsSubscriber(this, subscriber)
+            doSubscribe(detailsSubscriber, receiveInitial = false)
+            if (receiveInitial) {
+                subscriber.pathPrefixes.forEach { pathPrefix ->
+                    listDetailsRaw<T>("${pathPrefix}%").forEach {
+                        detailsSubscriber.onUpdate(it.path, it.detailPath, it.value)
+                    }
                 }
             }
-        }
+            null
+        })
     }
 
     /**
      * Unsubscribes the subscriber identified by subscriberId
      */
-    @Synchronized
     fun unsubscribe(subscriberId: String) {
-        val subscriber = subscribersById.remove(subscriberId)
-        subscriber?.pathPrefixes?.forEach { pathPrefix ->
-            val subscribersForPrefix =
-                subscribers.get(pathPrefix)?.remove(subscriber.id)
-            if (subscribersForPrefix?.size ?: 0 == 0) {
-                subscribers.remove(pathPrefix)
-            } else {
-                subscribers.put(pathPrefix, subscribersForPrefix)
+        txExecutor.submit(Callable<Void> {
+            val subscriber = subscribersById.remove(subscriberId)
+            subscriber?.pathPrefixes?.forEach { pathPrefix ->
+                val subscribersForPrefix =
+                    subscribers.get(pathPrefix)?.remove(subscriber.id)
+                if (subscribersForPrefix?.size ?: 0 == 0) {
+                    subscribers.remove(pathPrefix)
+                } else {
+                    subscribers.put(pathPrefix, subscribersForPrefix)
+                }
             }
-        }
-        when (subscriber) {
-            is DetailsSubscriber<*> -> subscriber.subscribersForDetails.values.forEach {
-                unsubscribe(
-                    it.id
-                )
+            when (subscriber) {
+                is DetailsSubscriber<*> -> subscriber.subscribersForDetails.values.forEach {
+                    unsubscribe(
+                        it.id
+                    )
+                }
             }
-        }
+            null
+        })
     }
 
     /**
@@ -244,22 +261,22 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
             }
         } else {
             // schedule the work to run in our single threaded executor
-            val future = txExecutor.submit(object : Callable<T> {
-                override fun call(): T {
-                    try {
-                        db.beginTransaction()
-                        currentTransaction.set(tx)
-                        val result = fn(tx)
-                        db.setTransactionSuccessful()
-                        tx.publish()
-                        return result
-                    } finally {
-                        db.endTransaction()
-                        currentTransaction.remove()
-                    }
+            val future = txExecutor.submit(Callable<T> {
+                try {
+                    db.beginTransaction()
+                    currentTransaction.set(tx)
+                    val result = fn(tx)
+                    db.setTransactionSuccessful()
+                    result
+                } finally {
+                    db.endTransaction()
+                    currentTransaction.remove()
                 }
             })
-            return future.get()
+            val result = future.get()
+            // publish outside of the txExecutor
+            tx.publish()
+            return result
         }
     }
 
@@ -685,7 +702,7 @@ internal class DetailsSubscriber<T : Any>(
         if (!subscribersForDetails.contains(path)) {
             val subscriberForDetails = SubscriberForDetails<T>(originalSubscriber, path, detailPath)
             subscribersForDetails[path] = subscriberForDetails
-            model.subscribe(subscriberForDetails)
+            model.doSubscribe(subscriberForDetails)
         }
         originalSubscriber.onUpdate(path, value)
     }
