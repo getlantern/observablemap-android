@@ -10,7 +10,10 @@ import net.sqlcipher.Cursor
 import net.sqlcipher.database.SQLiteDatabase
 import java.io.Closeable
 import java.util.*
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.collections.ArrayList
 import kotlin.collections.HashMap
@@ -54,8 +57,11 @@ abstract class Subscriber<T : Any>(id: String, vararg pathPrefixes: String) :
  * registration of observers for any time that a key path changes.
  */
 class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Serde()), Closeable {
-    internal val subscribers = RadixTree<PersistentMap<String, RawSubscriber<Any>>>();
+    internal val subscribers = RadixTree<PersistentMap<String, RawSubscriber<Any>>>()
     internal val subscribersById = ConcurrentHashMap<String, RawSubscriber<Any>>()
+    private val txExecutor = Executors.newSingleThreadExecutor()
+    private val currentTransaction = ThreadLocal<Transaction>()
+    private val savepointSequence = AtomicInteger()
 
     companion object {
         /**
@@ -73,21 +79,28 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
             SQLiteDatabase.loadLibs(ctx)
             val db = SQLiteDatabase.openOrCreateDatabase(filePath, password, null)
             if (!db.enableWriteAheadLogging()) {
-                throw Exception("Unable to enable write ahead logging")
+                throw RuntimeException("Unable to enable write ahead logging")
             }
             if (secureDelete) {
                 // Enable secure delete
                 val cursor = db.query("PRAGMA secure_delete;")
                 if (cursor == null || !cursor.moveToNext()) {
-                    throw Exception("Unable to enable secure delete");
+                    throw RuntimeException("Unable to enable secure delete")
                 }
             }
-            // All data is stored in a single table that has a TEXT path and a BLOB value
-            db.execSQL("CREATE TABLE IF NOT EXISTS data ([path] TEXT PRIMARY KEY, [value] BLOB)")
+            // All data is stored in a single table that has a TEXT path, a BLOB value. The table is
+            // stored as an index organized table (WITHOUT ROWID option) as a performance
+            // optimization for range scans on the path. To support full text indexing with an
+            // external content fts5 table, we include a manually managed INTEGER rowid to which we
+            // can join the fts5 virtual table. Rows that are not full text indexed have a null
+            // to save space.
+            db.execSQL("CREATE TABLE IF NOT EXISTS data (path TEXT PRIMARY KEY, value BLOB, rowid INTEGER) WITHOUT ROWID")
             // Create an index on only text values to speed up detail lookups that join on path = value
             db.execSQL("CREATE INDEX IF NOT EXISTS data_value_index ON data(value) WHERE SUBSTR(CAST(value AS TEXT), 1, 1) = 'T'")
             // Create a table for full text search
             db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(value, content=data, tokenize='porter unicode61')")
+            // Create a table for managing custom counters (currently used only for full text indexing)
+            db.execSQL("CREATE TABLE IF NOT EXISTS counters (id INTEGER PRIMARY KEY, value INTEGER)")
             return ObservableModel(db)
         }
     }
@@ -111,12 +124,25 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
      *
      * If receiveInitial is true, the subscriber will immediately be called for all matching values.
      */
-    @Synchronized
     fun <T : Any> subscribe(
         subscriber: RawSubscriber<T>,
         receiveInitial: Boolean = true
     ) {
-        if (subscribersById.putIfAbsent(subscriber.id, subscriber as RawSubscriber<Any>) != null) {
+        txExecutor.submit(Callable<Void> {
+            doSubscribe(subscriber, receiveInitial)
+            null
+        }).get()
+    }
+
+    internal fun <T : Any> doSubscribe(
+        subscriber: RawSubscriber<T>,
+        receiveInitial: Boolean = true
+    ) {
+        if (subscribersById.putIfAbsent(
+                subscriber.id,
+                subscriber as RawSubscriber<Any>
+            ) != null
+        ) {
             throw IllegalArgumentException("subscriber with id ${subscriber.id} already registered")
         }
         subscriber.pathPrefixes.forEach { pathPrefix ->
@@ -153,47 +179,49 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
      * if the paths /detail/1 or /detail/2 change, or if a new item is added to /list/ or an item
      * is deleted from /list/.
      */
-    @Synchronized
     fun <T : Any> subscribeDetails(
         subscriber: RawSubscriber<T>,
         receiveInitial: Boolean = true
     ) {
-        val detailsSubscriber = DetailsSubscriber(this, subscriber)
-        subscribe(detailsSubscriber, receiveInitial = false)
-        if (receiveInitial) {
-            subscriber.pathPrefixes.forEach { pathPrefix ->
-                listDetailsRaw<T>("${pathPrefix}%").forEach {
-                    detailsSubscriber.onUpdate(it.path, it.detailPath, it.value)
+        txExecutor.submit(Callable<Void> {
+            val detailsSubscriber = DetailsSubscriber(this, subscriber)
+            doSubscribe(detailsSubscriber, receiveInitial = false)
+            if (receiveInitial) {
+                subscriber.pathPrefixes.forEach { pathPrefix ->
+                    listDetailsRaw<T>("${pathPrefix}%").forEach {
+                        detailsSubscriber.onUpdate(it.path, it.detailPath, it.value)
+                    }
                 }
             }
-        }
+            null
+        })
     }
 
     /**
      * Unsubscribes the subscriber identified by subscriberId
      */
-    @Synchronized
     fun unsubscribe(subscriberId: String) {
-        val subscriber = subscribersById.remove(subscriberId)
-        subscriber?.pathPrefixes?.forEach { pathPrefix ->
-            val subscribersForPrefix =
-                subscribers.get(pathPrefix)?.remove(subscriber.id)
-            if (subscribersForPrefix?.size ?: 0 == 0) {
-                subscribers.remove(pathPrefix)
-            } else {
-                subscribers.put(pathPrefix, subscribersForPrefix)
+        txExecutor.submit(Callable<Void> {
+            val subscriber = subscribersById.remove(subscriberId)
+            subscriber?.pathPrefixes?.forEach { pathPrefix ->
+                val subscribersForPrefix =
+                    subscribers.get(pathPrefix)?.remove(subscriber.id)
+                if (subscribersForPrefix?.size ?: 0 == 0) {
+                    subscribers.remove(pathPrefix)
+                } else {
+                    subscribers.put(pathPrefix, subscribersForPrefix)
+                }
             }
-        }
-        when (subscriber) {
-            is DetailsSubscriber<*> -> subscriber.subscribersForDetails.values.forEach {
-                unsubscribe(
-                    it.id
-                )
+            when (subscriber) {
+                is DetailsSubscriber<*> -> subscriber.subscribersForDetails.values.forEach {
+                    unsubscribe(
+                        it.id
+                    )
+                }
             }
-        }
+            null
+        })
     }
-
-    val savepointSequence = AtomicInteger()
 
     /**
      * Mutates the database inside of a transaction.
@@ -202,19 +230,60 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
      *
      * If the callback completes without exception, the entire transaction is committed and all
      * listeners of affected key paths are notified.
+     *
+     * All mutating happens on a single thread. Nested calls to mutate are allowed and will
+     * each get their own sub-transaction implemented using savepoints.
      */
     fun <T> mutate(fn: (tx: Transaction) -> T): T {
-        val savepoint = "save_${savepointSequence.incrementAndGet()}"
-        try {
-            this.db.execSQL("SAVEPOINT $savepoint")
-            val tx = Transaction(this.db, this.serde, this.subscribers)
-            val result = fn(tx)
+        var inExecutor = false
+        val tx = synchronized(this) {
+            val _tx = currentTransaction.get()
+            if (_tx == null) {
+                Transaction(db, serde, subscribers)
+            } else {
+                inExecutor = true
+                _tx
+            }
+        }
+
+        return if (inExecutor) {
+            // we're already in the executor thread, do the work with a savepoint
+            val nestedTx = Transaction(
+                db,
+                serde,
+                subscribers,
+                tx.updates,
+                tx.deletions,
+                "save_${savepointSequence.incrementAndGet()}"
+            )
+            try {
+                nestedTx.beginSavepoint()
+                currentTransaction.set(nestedTx)
+                val result = fn(nestedTx)
+                nestedTx.setSavepointSuccessful()
+                result
+            } finally {
+                nestedTx.endSavepoint()
+                currentTransaction.set(tx)
+            }
+        } else {
+            // schedule the work to run in our single threaded executor
+            val future = txExecutor.submit(Callable<T> {
+                try {
+                    db.beginTransaction()
+                    currentTransaction.set(tx)
+                    val result = fn(tx)
+                    db.setTransactionSuccessful()
+                    result
+                } finally {
+                    db.endTransaction()
+                    currentTransaction.remove()
+                }
+            })
+            val result = future.get()
+            // publish outside of the txExecutor
             tx.publish()
-            this.db.execSQL("RELEASE $savepoint")
             return result
-        } catch (t: Throwable) {
-            this.db.execSQL("ROLLBACK TO $savepoint")
-            throw t
         }
     }
 
@@ -233,6 +302,8 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
 
     @Synchronized
     override fun close() {
+        txExecutor.shutdownNow()
+        txExecutor.awaitTermination(10, TimeUnit.SECONDS)
         db.close()
     }
 }
@@ -487,10 +558,31 @@ open class Queryable internal constructor(
 class Transaction internal constructor(
     db: SQLiteDatabase,
     serde: Serde,
-    private val subscribers: RadixTree<PersistentMap<String, RawSubscriber<Any>>>
+    private val subscribers: RadixTree<PersistentMap<String, RawSubscriber<Any>>>,
+    private val parentUpdates: HashMap<String, Raw<Any>>? = null,
+    private val parentDeletions: TreeSet<String>? = null,
+    private val savepoint: String? = null,
 ) : Queryable(db, serde) {
-    private val updates = HashMap<String, Raw<Any>>()
-    private val deletions = TreeSet<String>()
+    internal val updates = HashMap<String, Raw<Any>>()
+    internal val deletions = TreeSet<String>()
+    private var savepointSuccessful = false
+
+    internal fun beginSavepoint() {
+        db.execSQL("SAVEPOINT $savepoint")
+    }
+
+    internal fun setSavepointSuccessful() {
+        savepointSuccessful = true
+    }
+
+    internal fun endSavepoint() {
+        db.execSQL(if (savepointSuccessful) "RELEASE $savepoint" else "ROLLBACK TO $savepoint")
+        if (savepointSuccessful) {
+            // merge updates and deletions into parent
+            parentUpdates?.putAll(updates)
+            parentDeletions?.addAll(deletions)
+        }
+    }
 
     /**
      * Puts the given value at the given path. If the value is null, the path is deleted.
@@ -501,18 +593,25 @@ class Transaction internal constructor(
         val serializedPath = serde.serialize(path)
         value?.let {
             val bytes = serde.serialize(value)
-            db.execSQL(
-                "INSERT INTO data(path, value) VALUES(?, ?) ON CONFLICT(path) DO UPDATE SET value = EXCLUDED.value",
-                arrayOf(serializedPath, bytes)
-            )
+            var rowId: Long? = null
             if (fullText != null) {
+                db.execSQL("INSERT INTO counters(id, value) VALUES(0, 0) ON CONFLICT(id) DO UPDATE SET value = value+1")
+                val cursor = db.rawQuery("SELECT value FROM counters WHERE id = 0", null)
+                if (cursor == null || !cursor.moveToNext()) {
+                    throw RuntimeException("Unable to read counter value for full text indexing")
+                }
+                rowId = cursor.getLong(0)
                 db.execSQL(
-                    "INSERT INTO fts(rowid, value) VALUES((SELECT rowid FROM data WHERE path = ?), ?)",
-                    arrayOf(serializedPath, fullText)
+                    "INSERT INTO fts(rowid, value) VALUES(?, ?)",
+                    arrayOf(rowId, fullText)
                 )
             }
+            db.execSQL(
+                "INSERT INTO data(path, value, rowid) VALUES(?, ?, ?) ON CONFLICT(path) DO UPDATE SET value = EXCLUDED.value",
+                arrayOf(serializedPath, bytes, rowId)
+            )
             updates[path] = Raw(bytes, value)
-            deletions -= path
+            deletions!! -= path
         } ?: run {
             delete(path)
         }
@@ -547,7 +646,7 @@ class Transaction internal constructor(
             }
         }
         db.execSQL("DELETE FROM data WHERE path = ?", arrayOf(serializedPath))
-        deletions += path
+        deletions!! += path
         updates.remove(path)
     }
 
@@ -606,7 +705,7 @@ internal class DetailsSubscriber<T : Any>(
 
     @Synchronized
     override fun onUpdate(path: String, raw: Raw<String>) {
-        val detailPath = raw.value;
+        val detailPath = raw.value
         val newValue = model.getRaw<T>(detailPath)
         if (newValue != null) {
             onUpdate(path, detailPath, newValue)
@@ -617,7 +716,7 @@ internal class DetailsSubscriber<T : Any>(
         if (!subscribersForDetails.contains(path)) {
             val subscriberForDetails = SubscriberForDetails<T>(originalSubscriber, path, detailPath)
             subscribersForDetails[path] = subscriberForDetails
-            model.subscribe(subscriberForDetails)
+            model.doSubscribe(subscriberForDetails)
         }
         originalSubscriber.onUpdate(path, value)
     }
