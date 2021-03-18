@@ -5,27 +5,37 @@ import java.util.*
 import kotlin.collections.HashMap
 
 /**
- * Allows accessing an ObservableModel using the SharedPreferences API
+ * Allows accessing an ObservableModel using the SharedPreferences API.
+ *
+ * @param model the model in which to store the preferences
+ * @param prefix a prefix to prepend to all preference keys before storing them in the model
+ * @param initialValues the model will be populated with values from this SharedPreferences for any values that haven't already been set (useful for migrating from a regular SharedPreferences)
  */
 internal class SharedPreferencesAdapter(
     val model: ObservableModel,
     val prefix: String,
-    val fallback: SharedPreferences?
-) :
-    SharedPreferences {
+    initialValues: SharedPreferences?
+) : SharedPreferences {
     private val listenerIds = Collections.synchronizedList(ArrayList<ListenerId>())
 
-    override fun getAll(): MutableMap<String, *> {
-        val all = fallback?.let { it.all as MutableMap<String, Any?> } ?: HashMap()
-        model.list<Any>("${prefix}%").forEach { entry ->
-            all[unprefixedPath(entry.path)] = entry.value
+    init {
+        initialValues?.all?.let {
+            model.mutate { tx ->
+                it.forEach { (key, value) ->
+                    value?.let { tx.putIfAbsent(prefixedPath(key), value) }
+                }
+            }
+
         }
-        return all
+    }
+
+    override fun getAll(): MutableMap<String, *> {
+        return HashMap(model.list<Any>("${prefix}%").map { unprefixedPath(it.path) to it.value }
+            .toMap())
     }
 
     override fun getString(key: String, defValue: String?): String? {
-        return model.get<String>(prefixedPath(key)) ?: fallback?.let { it.getString(key, defValue) }
-        ?: defValue
+        return model.get<String>(prefixedPath(key)) ?: defValue
     }
 
     override fun getStringSet(key: String, defValues: MutableSet<String>?): MutableSet<String> {
@@ -33,31 +43,23 @@ internal class SharedPreferencesAdapter(
     }
 
     override fun getInt(key: String, defValue: Int): Int {
-        return model.get<Int>(prefixedPath(key)) ?: fallback?.let { it.getInt(key, defValue) }
-        ?: defValue
+        return model.get<Int>(prefixedPath(key)) ?: defValue
     }
 
     override fun getLong(key: String, defValue: Long): Long {
-        return model.get<Long>(prefixedPath(key)) ?: fallback?.let { it.getLong(key, defValue) }
-        ?: defValue
+        return model.get<Long>(prefixedPath(key)) ?: defValue
     }
 
     override fun getFloat(key: String, defValue: Float): Float {
-        return model.get<Float>(prefixedPath(key)) ?: fallback?.let { it.getFloat(key, defValue) }
-        ?: defValue
+        return model.get<Float>(prefixedPath(key)) ?: defValue
     }
 
     override fun getBoolean(key: String, defValue: Boolean): Boolean {
-        return model.get<Boolean>(prefixedPath(key)) ?: fallback?.let {
-            it.getBoolean(
-                key,
-                defValue
-            )
-        } ?: defValue
+        return model.get<Boolean>(prefixedPath(key)) ?: defValue
     }
 
     override fun contains(key: String): Boolean {
-        return model.get<Any>(prefixedPath(key)) != null || fallback?.contains(key) ?: false
+        return model.contains(prefixedPath(key))
     }
 
     override fun edit(): SharedPreferences.Editor {
