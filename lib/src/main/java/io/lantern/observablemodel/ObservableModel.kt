@@ -79,21 +79,28 @@ class ObservableModel private constructor(db: SQLiteDatabase) : Queryable(db, Se
             SQLiteDatabase.loadLibs(ctx)
             val db = SQLiteDatabase.openOrCreateDatabase(filePath, password, null)
             if (!db.enableWriteAheadLogging()) {
-                throw Exception("Unable to enable write ahead logging")
+                throw RuntimeException("Unable to enable write ahead logging")
             }
             if (secureDelete) {
                 // Enable secure delete
                 val cursor = db.query("PRAGMA secure_delete;")
                 if (cursor == null || !cursor.moveToNext()) {
-                    throw Exception("Unable to enable secure delete")
+                    throw RuntimeException("Unable to enable secure delete")
                 }
             }
-            // All data is stored in a single table that has a TEXT path and a BLOB value
-            db.execSQL("CREATE TABLE IF NOT EXISTS data ([path] TEXT PRIMARY KEY, [value] BLOB)")
+            // All data is stored in a single table that has a TEXT path, a BLOB value. The table is
+            // stored as an index organized table (WITHOUT ROWID option) as a performance
+            // optimization for range scans on the path. To support full text indexing with an
+            // external content fts5 table, we include a manually managed INTEGER rowid to which we
+            // can join the fts5 virtual table. Rows that are not full text indexed have a null
+            // to save space.
+            db.execSQL("CREATE TABLE IF NOT EXISTS data (path TEXT PRIMARY KEY, value BLOB, rowid INTEGER) WITHOUT ROWID")
             // Create an index on only text values to speed up detail lookups that join on path = value
             db.execSQL("CREATE INDEX IF NOT EXISTS data_value_index ON data(value) WHERE SUBSTR(CAST(value AS TEXT), 1, 1) = 'T'")
             // Create a table for full text search
             db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(value, content=data, tokenize='porter unicode61')")
+            // Create a table for managing custom counters (currently used only for full text indexing)
+            db.execSQL("CREATE TABLE IF NOT EXISTS counters (id INTEGER PRIMARY KEY, value INTEGER)")
             return ObservableModel(db)
         }
     }
@@ -569,7 +576,7 @@ class Transaction internal constructor(
     }
 
     internal fun endSavepoint() {
-        this.db.execSQL(if (savepointSuccessful) "RELEASE $savepoint" else "ROLLBACK TO $savepoint")
+        db.execSQL(if (savepointSuccessful) "RELEASE $savepoint" else "ROLLBACK TO $savepoint")
         if (savepointSuccessful) {
             // merge updates and deletions into parent
             parentUpdates?.putAll(updates)
@@ -586,16 +593,23 @@ class Transaction internal constructor(
         val serializedPath = serde.serialize(path)
         value?.let {
             val bytes = serde.serialize(value)
-            db.execSQL(
-                "INSERT INTO data(path, value) VALUES(?, ?) ON CONFLICT(path) DO UPDATE SET value = EXCLUDED.value",
-                arrayOf(serializedPath, bytes)
-            )
+            var rowId: Long? = null
             if (fullText != null) {
+                db.execSQL("INSERT INTO counters(id, value) VALUES(0, 0) ON CONFLICT(id) DO UPDATE SET value = value+1")
+                val cursor = db.rawQuery("SELECT value FROM counters WHERE id = 0", null)
+                if (cursor == null || !cursor.moveToNext()) {
+                    throw RuntimeException("Unable to read counter value for full text indexing")
+                }
+                rowId = cursor.getLong(0)
                 db.execSQL(
-                    "INSERT INTO fts(rowid, value) VALUES((SELECT rowid FROM data WHERE path = ?), ?)",
-                    arrayOf(serializedPath, fullText)
+                    "INSERT INTO fts(rowid, value) VALUES(?, ?)",
+                    arrayOf(rowId, fullText)
                 )
             }
+            db.execSQL(
+                "INSERT INTO data(path, value, rowid) VALUES(?, ?, ?) ON CONFLICT(path) DO UPDATE SET value = EXCLUDED.value",
+                arrayOf(serializedPath, bytes, rowId)
+            )
             updates[path] = Raw(bytes, value)
             deletions!! -= path
         } ?: run {
