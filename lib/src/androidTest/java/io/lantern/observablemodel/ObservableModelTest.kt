@@ -208,6 +208,42 @@ class ObservableModelTest {
     }
 
     @Test
+    fun testPut() {
+        buildModel().use { model ->
+            val updates = ArrayList<String>()
+            model.subscribe(object : Subscriber<String>("100", "path") {
+                override fun onUpdate(path: String, value: String) {
+                    updates.add(value)
+                }
+
+                override fun onDelete(path: String) {
+                }
+            })
+
+            model.mutate { tx ->
+                assertTrue(tx.putIfAbsent("path", "a"))
+            }
+            assertEquals("correct value should have been inserted", "a", model.get("path"))
+
+            model.mutate { tx ->
+                assertFalse(tx.putIfAbsent("path", "b"))
+            }
+            assertEquals(
+                "value should not have been udpated by putIfAbsent",
+                "a",
+                model.get("path")
+            )
+
+            model.mutate { tx ->
+                tx.put("path", "c")
+            }
+            assertEquals("value should have been udpated by regular put", "c", model.get("path"))
+
+            assertEquals(arrayListOf("a", "c"), updates)
+        }
+    }
+
+    @Test
     fun testSubscribeDirectLate() {
         buildModel().use { model ->
             var theValue = "thevalue";
@@ -475,10 +511,13 @@ class ObservableModelTest {
             .putLong("long", 3).putString("string", "fallbackstring").commit()
         buildModel().use { model ->
             ;
-            val prefs = model.asSharedPreferences("/prefs/", fallback)
-            prefs.edit().putBoolean("boolean", true).putFloat("float", 11.11.toFloat())
+            // First set up the preferences without a fallback
+            val initPrefs = model.asSharedPreferences("/prefs/")
+            initPrefs.edit().putBoolean("boolean", true).putFloat("float", 11.11.toFloat())
                 .putInt("int", 22)
                 .putLong("long", 33).putString("string", "realstring").commit()
+            // Now set it up with the fallback (this ensures that we don't overwrite stuff in the model from the fallback)
+            val prefs = model.asSharedPreferences("/prefs/", fallback)
 
             assertEquals(
                 mapOf(
@@ -519,24 +558,6 @@ class ObservableModelTest {
             assertEquals("realstring", prefs.getString("string", "unknownstring"))
             assertEquals("fallbackstring", prefs.getString("fstring", "unknownstring"))
             assertEquals("unknownstring", prefs.getString("ustring", "unknownstring"))
-
-            prefs.edit().remove("boolean").remove("float").remove("int").remove("long")
-                .remove("string")
-                .apply()
-            assertNull(model.get<Boolean>("/prefs/boolean"))
-            assertTrue(prefs.getBoolean("boolean", false))
-
-            assertNull(model.get<Float>("/prefs/float"))
-            assertEquals(1.1.toFloat(), prefs.getFloat("float", 111.111.toFloat()))
-
-            assertNull(model.get<Int>("/prefs/int"))
-            assertEquals(2, prefs.getInt("int", 222))
-
-            assertNull(model.get<Long>("/prefs/long"))
-            assertEquals(3.toLong(), prefs.getLong("long", 333))
-
-            assertNull(model.get<String>("/prefs/string"))
-            assertEquals("fallbackstring", prefs.getString("string", "unknownstring"))
         }
     }
 

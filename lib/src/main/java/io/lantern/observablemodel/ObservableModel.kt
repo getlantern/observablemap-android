@@ -7,6 +7,7 @@ import ca.gedge.radixtree.RadixTreeVisitor
 import kotlinx.collections.immutable.PersistentMap
 import kotlinx.collections.immutable.persistentHashMapOf
 import net.sqlcipher.Cursor
+import net.sqlcipher.database.SQLiteConstraintException
 import net.sqlcipher.database.SQLiteDatabase
 import java.io.Closeable
 import java.util.*
@@ -585,36 +586,64 @@ class Transaction internal constructor(
     }
 
     /**
-     * Puts the given value at the given path. If the value is null, the path is deleted.
+     * Puts the given value at the given path. If the value is null, the path is deleted. If there's
+     * an existing value at this path, it's replaced.
      *
      * If fullText is populated, the given data will also be full text indexed.
      */
     fun put(path: String, value: Any?, fullText: String? = null) {
-        val serializedPath = serde.serialize(path)
         value?.let {
-            val bytes = serde.serialize(value)
-            var rowId: Long? = null
-            if (fullText != null) {
-                db.execSQL("INSERT INTO counters(id, value) VALUES(0, 0) ON CONFLICT(id) DO UPDATE SET value = value+1")
-                val cursor = db.rawQuery("SELECT value FROM counters WHERE id = 0", null)
-                if (cursor == null || !cursor.moveToNext()) {
-                    throw RuntimeException("Unable to read counter value for full text indexing")
-                }
-                rowId = cursor.getLong(0)
-                db.execSQL(
-                    "INSERT INTO fts(rowid, value) VALUES(?, ?)",
-                    arrayOf(rowId, fullText)
-                )
-            }
-            db.execSQL(
-                "INSERT INTO data(path, value, rowid) VALUES(?, ?, ?) ON CONFLICT(path) DO UPDATE SET value = EXCLUDED.value",
-                arrayOf(serializedPath, bytes, rowId)
-            )
-            updates[path] = Raw(bytes, value)
-            deletions!! -= path
+            doPut(path, value, fullText, true)
         } ?: run {
             delete(path)
         }
+    }
+
+    /**
+     * Puts the given value at the given path if and only if there was no value already prsent.
+     *
+     * @return true if the value was successfully put, false if it wasn't because there was already a value
+     */
+    fun putIfAbsent(path: String, value: Any, fullText: String? = null): Boolean {
+        try {
+            doPut(path, value, fullText, false)
+            return true
+        } catch (e: SQLiteConstraintException) {
+            return false
+        }
+    }
+
+    private fun doPut(
+        path: String,
+        value: Any,
+        fullText: String?,
+        updateIfPresent: Boolean
+    ) {
+        val serializedPath = serde.serialize(path)
+        val onConflictClause =
+            if (updateIfPresent) " ON CONFLICT(path) DO UPDATE SET value = EXCLUDED.value" else ""
+        val bytes = serde.serialize(value)
+        var rowId: Long? = null
+        if (fullText != null) {
+            db.execSQL("INSERT INTO counters(id, value) VALUES(0, 0) ON CONFLICT(id) DO UPDATE SET value = value+1")
+            val cursor = db.rawQuery("SELECT value FROM counters WHERE id = 0", null)
+            if (cursor == null || !cursor.moveToNext()) {
+                throw RuntimeException("Unable to read counter value for full text indexing")
+            }
+            rowId = cursor.getLong(0)
+        }
+        db.execSQL(
+            "INSERT INTO data(path, value, rowid) VALUES(?, ?, ?)${onConflictClause}",
+            arrayOf(serializedPath, bytes, rowId)
+        )
+        if (fullText != null) {
+            db.execSQL(
+                "INSERT INTO fts(rowid, value) VALUES(?, ?)",
+                arrayOf(rowId, fullText)
+            )
+        }
+        updates[path] = Raw(bytes, value)
+        deletions!! -= path
     }
 
     /**
